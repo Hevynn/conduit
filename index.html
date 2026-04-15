@@ -1,0 +1,2711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CONDUIT // signal lock</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Major+Mono+Display&family=Sora:wght@200;300;400;500;600&family=Geist+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/streamsaver@2.0.6/StreamSaver.min.js"></script>
+<style>
+  :root {
+    --void:        #06060a;
+    --void-2:      #0a0a12;
+    --void-3:      #10101a;
+    --hull:        #1a1a26;
+    --hull-hot:    #2a2a3a;
+    --bone:        #ebe8dd;
+    --bone-dim:    #8a8794;
+    --bone-faint:  #3e3c48;
+    --bone-ghost:  #25232e;
+    --bio:         #8affd4;
+    --bio-deep:    #4fd9a8;
+    --bio-glow:    rgba(138, 255, 212, 0.5);
+    --plasma:      #ff7a4a;
+    --plasma-glow: rgba(255, 122, 74, 0.35);
+    --amber:       #ffc266;
+    --warn:        #ff5577;
+
+    --display:  'Major Mono Display', monospace;
+    --mono:     'Geist Mono', ui-monospace, monospace;
+    --ui:       'Sora', -apple-system, sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--void);
+    color: var(--bone);
+    font-family: var(--ui);
+    font-weight: 300;
+    font-size: 14px;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* Atmospheric layers */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 50% at 50% 0%, rgba(138, 255, 212, 0.05), transparent 70%),
+      radial-gradient(ellipse 60% 40% at 50% 100%, rgba(255, 122, 74, 0.035), transparent 70%),
+      radial-gradient(circle at 50% 50%, var(--void-2) 0%, var(--void) 100%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.08 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    opacity: 0.5;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  /* Scan line overlay */
+  .scanline {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 3;
+    background: linear-gradient(to bottom, transparent 49%, rgba(138, 255, 212, 0.015) 50%, transparent 51%);
+    background-size: 100% 4px;
+    animation: scan-drift 8s linear infinite;
+    mix-blend-mode: screen;
+  }
+  @keyframes scan-drift {
+    0% { background-position: 0 0; }
+    100% { background-position: 0 100vh; }
+  }
+
+  /* ============ EDGE RULERS ============ */
+  .edge-ruler {
+    position: fixed;
+    top: 100px;
+    bottom: 100px;
+    width: 12px;
+    pointer-events: none;
+    z-index: 4;
+    opacity: 0.35;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 19px,
+      var(--bone-faint) 19px,
+      var(--bone-faint) 20px
+    );
+  }
+  .edge-ruler.left { left: 6px; }
+  .edge-ruler.right { right: 6px; }
+  .edge-ruler::before,
+  .edge-ruler::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--bone-dim);
+  }
+  .edge-ruler::before { top: 0; }
+  .edge-ruler::after { bottom: 0; }
+
+  /* ============ AMBIENT BACKGROUND RINGS ============ */
+  .ambient-rings {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .ambient-rings svg {
+    width: 160vmin;
+    height: 160vmin;
+    min-width: 900px;
+    min-height: 900px;
+    color: var(--bone-faint);
+    opacity: 0.55;
+    overflow: visible;
+  }
+  .amb-ring-1 { transform-origin: 0 0; animation: spin-slow     200s linear infinite; }
+  .amb-ring-2 { transform-origin: 0 0; animation: spin-slow-rev 260s linear infinite; }
+  .amb-ring-3 { transform-origin: 0 0; animation: spin-slow     140s linear infinite; }
+  .amb-ring-4 { transform-origin: 0 0; animation: spin-slow-rev 320s linear infinite; }
+  .amb-ring-5 { transform-origin: 0 0; animation: spin-slow      90s linear infinite; }
+  .amb-glow-node {
+    fill: var(--bio);
+    filter: drop-shadow(0 0 10px var(--bio-glow));
+    animation: glow-pulse 4s ease-in-out infinite;
+  }
+  .amb-glow-node.alt { fill: var(--plasma); filter: drop-shadow(0 0 10px var(--plasma-glow)); animation-delay: 2s; }
+  @keyframes glow-pulse {
+    0%, 100% { opacity: 0.9; }
+    50% { opacity: 0.35; }
+  }
+
+  /* ============ DECOR LAYER (corner HUD + floating labels) ============ */
+  .decor-layer {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 5;
+    font-family: var(--mono);
+    color: var(--bone-dim);
+  }
+
+  .decor {
+    position: absolute;
+    padding: 24px;
+    display: flex;
+    gap: 14px;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .decor.top-left    { top: 0; left: 0; align-items: flex-start; }
+  .decor.top-right   { top: 0; right: 0; align-items: flex-start; flex-direction: row-reverse; }
+  .decor.bottom-left { bottom: 0; left: 0; align-items: flex-end; }
+  .decor.bottom-right{ bottom: 0; right: 0; align-items: flex-end; flex-direction: row-reverse; }
+  .decor.mid-left    { top: 50%; left: 0; transform: translateY(-50%); align-items: center; padding: 0 28px; }
+  .decor.mid-right   { top: 50%; right: 0; transform: translateY(-50%); align-items: center; padding: 0 28px; flex-direction: row-reverse; }
+
+  .corner-bracket {
+    width: 44px;
+    height: 44px;
+    color: var(--bone-faint);
+    flex-shrink: 0;
+  }
+
+  .readout {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 120px;
+  }
+  .decor.top-right .readout,
+  .decor.bottom-right .readout { text-align: right; }
+
+  .readout .line {
+    color: var(--bone-faint);
+    line-height: 1.7;
+    white-space: nowrap;
+  }
+  .readout .line.head {
+    color: var(--bone-dim);
+    font-size: 8px;
+    letter-spacing: 0.25em;
+    margin-bottom: 2px;
+  }
+  .readout .line.bio { color: var(--bio); text-shadow: 0 0 6px var(--bio-glow); }
+  .readout .line.plasma { color: var(--plasma); }
+  .readout .line.amber { color: var(--amber); }
+  .readout .line.sep {
+    color: var(--bone-ghost);
+    letter-spacing: 0.3em;
+    font-size: 8px;
+  }
+
+  /* Top-right signal bars */
+  .signal-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 26px;
+    margin-bottom: 6px;
+    justify-content: flex-end;
+  }
+  .signal-bars .bar {
+    width: 3px;
+    background: var(--bone-faint);
+    transform-origin: bottom;
+    animation: sigbar 1.3s ease-in-out infinite;
+  }
+  .signal-bars .bar:nth-child(1) { height: 30%; animation-delay: 0.0s; }
+  .signal-bars .bar:nth-child(2) { height: 55%; animation-delay: 0.09s; }
+  .signal-bars .bar:nth-child(3) { height: 75%; animation-delay: 0.18s; }
+  .signal-bars .bar:nth-child(4) { height: 100%; animation-delay: 0.27s; }
+  .signal-bars .bar:nth-child(5) { height: 80%; animation-delay: 0.36s; }
+  .signal-bars .bar:nth-child(6) { height: 60%; animation-delay: 0.45s; }
+  .signal-bars .bar:nth-child(7) { height: 40%; animation-delay: 0.54s; }
+  @keyframes sigbar {
+    0%, 100% { opacity: 0.4; transform: scaleY(0.6); background: var(--bone-faint); }
+    50%      { opacity: 1;   transform: scaleY(1);   background: var(--bio); }
+  }
+
+  /* Bottom-left sigil */
+  .sigil {
+    width: 76px;
+    height: 76px;
+    color: var(--bone-faint);
+    flex-shrink: 0;
+    filter: drop-shadow(0 0 16px rgba(138, 255, 212, 0.12));
+  }
+  .sigil .outer-ring {
+    transform-origin: 40px 40px;
+    animation: spin-slow 32s linear infinite;
+  }
+  .sigil .inner-ring {
+    transform-origin: 40px 40px;
+    animation: spin-slow-rev 20s linear infinite;
+  }
+  .sigil .extra-ring {
+    transform-origin: 40px 40px;
+    animation: spin-slow 48s linear infinite;
+  }
+  .sigil-glyph {
+    font-family: var(--display);
+    font-size: 7px;
+    fill: var(--bone-dim);
+  }
+  .sigil .core-dot {
+    fill: var(--bio);
+    filter: drop-shadow(0 0 4px var(--bio-glow));
+  }
+
+  /* Mid-side mini sigils */
+  .mini-sigil {
+    width: 96px;
+    height: 96px;
+    color: var(--bone-faint);
+    flex-shrink: 0;
+    filter: drop-shadow(0 0 22px rgba(138, 255, 212, 0.12));
+  }
+  .mini-sigil .ring-a { transform-origin: 48px 48px; animation: spin-slow     30s linear infinite; }
+  .mini-sigil .ring-b { transform-origin: 48px 48px; animation: spin-slow-rev 18s linear infinite; }
+  .mini-sigil .ring-c { transform-origin: 48px 48px; animation: spin-slow     46s linear infinite; }
+  .mini-sigil .mini-core {
+    fill: var(--bio);
+    filter: drop-shadow(0 0 6px var(--bio-glow));
+    animation: glow-pulse 3s ease-in-out infinite;
+  }
+  .mini-dot { fill: currentColor; }
+  .mini-dot.hot { fill: var(--bio); filter: drop-shadow(0 0 3px var(--bio-glow)); }
+  .mini-dot.plasma { fill: var(--plasma); filter: drop-shadow(0 0 3px var(--plasma-glow)); }
+
+  /* Glow halos — soft radial behind sigils */
+  .halo {
+    position: absolute;
+    width: 160px;
+    height: 160px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(138, 255, 212, 0.08) 0%, transparent 65%);
+    pointer-events: none;
+    animation: halo-breathe 6s ease-in-out infinite;
+  }
+  .halo.bottom-left  { bottom: 16px; left: 22px; }
+  .halo.mid-left     { top: 50%; left: 18px; transform: translateY(-50%); }
+  .halo.mid-right    { top: 50%; right: 18px; transform: translateY(-50%); }
+  .halo.bottom-right { bottom: 30px; right: 30px; width: 180px; height: 120px; }
+  @keyframes halo-breathe {
+    0%, 100% { opacity: 0.9; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.1); }
+  }
+  .halo.mid-left, .halo.mid-right {
+    transform-origin: center;
+    animation: halo-breathe-mid 6s ease-in-out infinite;
+  }
+  @keyframes halo-breathe-mid {
+    0%, 100% { opacity: 0.9; transform: translateY(-50%) scale(1); }
+    50% { opacity: 0.5; transform: translateY(-50%) scale(1.1); }
+  }
+
+  /* Bottom-right constellation */
+  .constellation {
+    width: 140px;
+    height: 90px;
+    color: var(--bone-faint);
+    flex-shrink: 0;
+    filter: drop-shadow(0 0 12px rgba(138, 255, 212, 0.1));
+  }
+  .constellation .star-bright {
+    fill: var(--bio);
+    filter: drop-shadow(0 0 3px var(--bio-glow));
+    animation: twinkle 3s ease-in-out infinite;
+  }
+  .constellation .star-bright:nth-child(odd) { animation-delay: 1.5s; }
+  @keyframes twinkle {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.4; }
+  }
+
+  /* Floating edge HUD labels */
+  .hud-label {
+    position: fixed;
+    z-index: 5;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--bone-faint);
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .hud-label .dot {
+    width: 5px; height: 5px;
+    background: var(--bone-dim);
+    border-radius: 50%;
+  }
+  .hud-label.active .dot {
+    background: var(--bio);
+    box-shadow: 0 0 6px var(--bio-glow);
+    animation: blink 2s infinite;
+  }
+  .hud-label .val { color: var(--bio); }
+  .hud-label .val.warm { color: var(--amber); }
+  .hud-label .val.hot { color: var(--plasma); }
+
+  /* Position each HUD label */
+  .hud-l1 { top: 18%; left: 34px; }
+  .hud-l2 { top: 32%; left: 34px; }
+  .hud-l3 { top: 48%; left: 34px; }
+  .hud-l4 { top: 62%; left: 34px; }
+  .hud-l5 { top: 78%; left: 34px; }
+
+  .hud-r1 { top: 22%; right: 34px; flex-direction: row-reverse; }
+  .hud-r2 { top: 38%; right: 34px; flex-direction: row-reverse; }
+  .hud-r3 { top: 54%; right: 34px; flex-direction: row-reverse; }
+  .hud-r4 { top: 70%; right: 34px; flex-direction: row-reverse; }
+  .hud-r5 { top: 85%; right: 34px; flex-direction: row-reverse; }
+
+  /* ============ APP CONTAINER ============ */
+  .app {
+    position: relative;
+    z-index: 4;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 64px 40px 96px;
+  }
+
+  /* HEADER */
+  header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 72px;
+  }
+  .brand {
+    font-family: var(--display);
+    font-size: 38px;
+    letter-spacing: 0.15em;
+    color: var(--bone);
+    line-height: 1;
+    text-transform: lowercase;
+  }
+  .brand .glyph {
+    color: var(--bio);
+    text-shadow: 0 0 24px var(--bio-glow);
+  }
+  .meta {
+    text-align: right;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--bone-dim);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    line-height: 1.8;
+  }
+  .meta .v { color: var(--bio); }
+  .audio-toggle {
+    display: inline-block;
+    margin-top: 8px;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--bone-faint);
+    cursor: pointer;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    transition: color 0.2s;
+    user-select: none;
+  }
+  .audio-toggle:hover { color: var(--bone-dim); }
+  .audio-toggle.on { color: var(--bio); text-shadow: 0 0 8px var(--bio-glow); }
+
+  /* HERO APERTURE */
+  .aperture-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 56px;
+    position: relative;
+  }
+  .aperture {
+    width: 380px;
+    height: 380px;
+    position: relative;
+  }
+  .aperture svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .ring {
+    fill: none;
+    stroke: var(--hull);
+    stroke-width: 1;
+  }
+  .ring.ring-outer { stroke: var(--bone-ghost); }
+  .ring.ring-mid   { stroke: var(--hull-hot); }
+  .ring.ring-inner { stroke: var(--bone-ghost); }
+  .tick { stroke: var(--bone-faint); stroke-width: 1; }
+  .tick-major { stroke: var(--bone-dim); stroke-width: 1.5; }
+  .pip {
+    fill: var(--plasma);
+    filter: drop-shadow(0 0 6px var(--plasma-glow));
+  }
+  .core-disc {
+    fill: var(--void);
+    stroke: var(--hull-hot);
+    stroke-width: 1;
+  }
+
+  .radar-sweep { display: none; }
+  .radar-sweep line {
+    stroke: url(#sweepGradient);
+    stroke-width: 2;
+  }
+
+  .orbital-group {
+    transform-origin: 150px 150px;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+  }
+  .orbital-1 { transform-origin: 150px 150px; animation: spin-slow-rev 12s linear infinite; }
+  .orbital-2 { transform-origin: 150px 150px; animation: spin-slow 18s linear infinite; }
+  .orbital-3 { transform-origin: 150px 150px; animation: spin-slow-rev 28s linear infinite; }
+  .orbital-particle {
+    fill: var(--bio);
+    filter: drop-shadow(0 0 4px var(--bio-glow));
+  }
+
+  #ring-outer-group { transform-origin: 150px 150px; }
+  #ring-mid-group   { transform-origin: 150px 150px; }
+
+  .aperture[data-state="idle"] #ring-outer-group { animation: spin-slow 60s linear infinite; }
+  .aperture[data-state="idle"] .pip { fill: var(--plasma); }
+
+  .aperture[data-state="searching"] #ring-outer-group { animation: spin-fast 4s linear infinite; }
+  .aperture[data-state="searching"] #ring-mid-group   { animation: spin-slow-rev 20s linear infinite; }
+  .aperture[data-state="searching"] .pip { fill: var(--amber); }
+  .aperture[data-state="searching"] .radar-sweep {
+    display: block;
+    animation: sweep 2s linear infinite;
+    transform-origin: 150px 150px;
+  }
+
+  .aperture[data-state="locked"] #ring-outer-group { animation: spin-slow 40s linear infinite; }
+  .aperture[data-state="locked"] #ring-mid-group   { animation: spin-slow-rev 80s linear infinite; }
+  .aperture[data-state="locked"] .ring-outer { stroke: var(--bio-deep); }
+  .aperture[data-state="locked"] .ring-mid   { stroke: var(--bio-deep); }
+  .aperture[data-state="locked"] .ring-inner { stroke: var(--bio); }
+  .aperture[data-state="locked"] .pip { fill: var(--bio); filter: drop-shadow(0 0 10px var(--bio-glow)); }
+  .aperture[data-state="locked"] .core-disc { stroke: var(--bio-deep); animation: breathe 4s ease-in-out infinite; }
+  .aperture[data-state="locked"] .orbital-group { opacity: 1; }
+
+  .aperture[data-state="error"] .ring-inner { stroke: var(--warn); }
+  .aperture[data-state="error"] .pip { fill: var(--warn); }
+
+  @keyframes spin-slow     { to { transform: rotate(360deg); } }
+  @keyframes spin-fast     { to { transform: rotate(360deg); } }
+  @keyframes spin-slow-rev { to { transform: rotate(-360deg); } }
+  @keyframes sweep         { to { transform: rotate(360deg); } }
+  @keyframes breathe {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+  @keyframes blink { 50% { opacity: 0.2; } }
+
+  .aperture-core {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    pointer-events: none;
+    padding: 20px;
+  }
+  .core-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.35em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+    margin-bottom: 12px;
+  }
+  .core-id {
+    font-family: var(--display);
+    font-size: 34px;
+    color: var(--bone);
+    letter-spacing: 0.18em;
+    word-break: break-all;
+    max-width: 200px;
+    line-height: 1.2;
+    pointer-events: auto;
+    user-select: all;
+    cursor: text;
+  }
+  .aperture[data-state="locked"] .core-id { color: var(--bio); text-shadow: 0 0 16px var(--bio-glow); }
+  .core-status {
+    margin-top: 16px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+  }
+  .core-status .dot {
+    display: inline-block;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--bone-dim);
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .aperture[data-state="idle"]      .core-status .dot { background: var(--plasma); box-shadow: 0 0 6px var(--plasma); }
+  .aperture[data-state="searching"] .core-status .dot { background: var(--amber); animation: blink 1s infinite; }
+  .aperture[data-state="locked"]    .core-status .dot { background: var(--bio); box-shadow: 0 0 8px var(--bio); }
+  .aperture[data-state="error"]     .core-status .dot { background: var(--warn); }
+
+  .aperture-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+    pointer-events: auto;
+  }
+
+  /* LINK CONTROLS */
+  .link-controls-wrap {
+    max-width: 600px;
+    margin: 0 auto 24px;
+    padding: 0 16px;
+  }
+  .link-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  .input-shell {
+    flex: 1;
+    position: relative;
+    border-bottom: 1px solid var(--hull-hot);
+    transition: border-color 0.3s;
+  }
+  .input-shell:focus-within { border-bottom-color: var(--bio); }
+  .input-shell::before {
+    content: '>';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--bio);
+    font-family: var(--mono);
+    font-size: 12px;
+    opacity: 0.7;
+  }
+  input[type="text"], input[type="password"] {
+    width: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--bone);
+    font-family: var(--display);
+    font-size: 16px;
+    letter-spacing: 0.15em;
+    padding: 14px 0 14px 20px;
+    text-transform: uppercase;
+  }
+  input::placeholder {
+    color: var(--bone-faint);
+    font-family: var(--ui);
+    font-weight: 300;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    font-size: 11px;
+  }
+
+  .passphrase-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+  }
+  .passphrase-row .input-shell { max-width: 240px; }
+  .passphrase-row .input-shell input {
+    font-size: 12px;
+    padding: 10px 0 10px 18px;
+  }
+
+  .reconnect-banner {
+    max-width: 600px;
+    margin: 0 auto 24px;
+    padding: 12px 20px;
+    border: 1px dashed var(--bio-deep);
+    background: rgba(138, 255, 212, 0.03);
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+  }
+  .reconnect-banner.show { display: flex; }
+  .reconnect-banner .label { color: var(--bio); }
+
+  /* BUTTONS */
+  button {
+    background: transparent;
+    color: var(--bone-dim);
+    border: 1px solid var(--hull-hot);
+    padding: 10px 20px;
+    font-family: var(--ui);
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) {
+    color: var(--bone);
+    border-color: var(--bone-dim);
+  }
+  button:disabled { opacity: 0.25; cursor: not-allowed; }
+  button.primary {
+    border-color: var(--bio-deep);
+    color: var(--bio);
+  }
+  button.primary:hover:not(:disabled) {
+    background: rgba(138, 255, 212, 0.06);
+    border-color: var(--bio);
+    box-shadow: 0 0 20px rgba(138, 255, 212, 0.12);
+  }
+  button.ghost {
+    border-color: transparent;
+    padding: 8px 12px;
+    color: var(--bone-dim);
+  }
+  button.ghost:hover:not(:disabled) {
+    color: var(--bone);
+    border-color: transparent;
+  }
+  button.warn:hover:not(:disabled) {
+    color: var(--warn);
+    border-color: var(--warn);
+  }
+
+  /* OVERLAY (QR + Accept) */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(6, 6, 10, 0.92);
+    backdrop-filter: blur(8px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 24px;
+  }
+  .overlay.open { display: flex; }
+  .overlay-card {
+    background: var(--void-2);
+    border: 1px solid var(--hull-hot);
+    padding: 32px;
+    text-align: center;
+    max-width: 380px;
+    position: relative;
+  }
+  .overlay-card::before {
+    content: '';
+    position: absolute;
+    top: -1px; left: -1px;
+    width: 14px; height: 14px;
+    border-top: 1px solid var(--bio);
+    border-left: 1px solid var(--bio);
+  }
+  .overlay-card::after {
+    content: '';
+    position: absolute;
+    bottom: -1px; right: -1px;
+    width: 14px; height: 14px;
+    border-bottom: 1px solid var(--bio);
+    border-right: 1px solid var(--bio);
+  }
+  .overlay-card canvas {
+    display: block;
+    margin: 0 auto 16px;
+    border: 1px solid var(--hull);
+    padding: 12px;
+    background: var(--void);
+  }
+  .overlay-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+    margin-bottom: 20px;
+  }
+  .overlay-title {
+    font-family: var(--display);
+    font-size: 18px;
+    color: var(--bio);
+    text-shadow: 0 0 12px var(--bio-glow);
+    margin-bottom: 16px;
+    letter-spacing: 0.1em;
+  }
+  .overlay-body {
+    font-size: 13px;
+    color: var(--bone-dim);
+    line-height: 1.6;
+    margin-bottom: 24px;
+  }
+  .overlay-body strong { color: var(--bone); }
+  .overlay-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+  }
+
+  /* DROP APERTURE */
+  .drop-section { margin-bottom: 56px; text-align: center; }
+  .section-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.35em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+  }
+  .section-title::before,
+  .section-title::after {
+    content: '';
+    height: 1px;
+    background: var(--hull);
+    flex: 1;
+    max-width: 120px;
+  }
+  .drop-zone {
+    position: relative;
+    width: 280px;
+    height: 280px;
+    margin: 0 auto;
+    cursor: pointer;
+    transition: all 0.3s ease;
+  }
+  .drop-zone svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  .drop-hex {
+    fill: var(--void-2);
+    stroke: var(--hull-hot);
+    stroke-width: 1;
+    transition: all 0.3s ease;
+  }
+  .drop-hex-inner {
+    fill: none;
+    stroke: var(--bone-faint);
+    stroke-width: 1;
+    stroke-dasharray: 3 6;
+    transition: all 0.3s ease;
+  }
+  .drop-arrow {
+    fill: var(--bone-dim);
+    transition: all 0.3s ease;
+  }
+  .drop-zone:hover:not(.disabled) .drop-hex { stroke: var(--bio-deep); }
+  .drop-zone:hover:not(.disabled) .drop-hex-inner {
+    stroke: var(--bio);
+    stroke-dasharray: 4 4;
+    animation: dash-flow 20s linear infinite;
+  }
+  .drop-zone:hover:not(.disabled) .drop-arrow { fill: var(--bio); }
+  .drop-zone.dragover .drop-hex {
+    stroke: var(--bio);
+    fill: rgba(138, 255, 212, 0.03);
+    filter: drop-shadow(0 0 20px var(--bio-glow));
+  }
+  .drop-zone.dragover .drop-hex-inner {
+    stroke: var(--bio);
+    animation: dash-flow 4s linear infinite;
+  }
+  .drop-zone.disabled { opacity: 0.3; cursor: not-allowed; }
+  @keyframes dash-flow { to { stroke-dashoffset: -100; } }
+
+  .drop-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    gap: 12px;
+  }
+  .drop-label .primary {
+    font-family: var(--display);
+    font-size: 14px;
+    letter-spacing: 0.15em;
+    color: var(--bone);
+    text-transform: lowercase;
+  }
+  .drop-label .secondary {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+  }
+  .drop-zone.disabled .drop-label .secondary { color: var(--bone-faint); }
+
+  /* TRANSFERS + CHAT SPLIT */
+  .split {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 32px;
+    margin-bottom: 56px;
+  }
+  @media (max-width: 820px) {
+    .split { grid-template-columns: 1fr; }
+  }
+
+  .transfers {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .transfer {
+    background: var(--void-2);
+    border: 1px solid var(--hull);
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 18px;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .transfer::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 2px;
+    background: var(--hull-hot);
+    transition: background 0.3s;
+  }
+  .transfer.sending::before   { background: var(--plasma); box-shadow: 0 0 12px var(--plasma-glow); }
+  .transfer.receiving::before { background: var(--bio); box-shadow: 0 0 12px var(--bio-glow); }
+  .transfer.done::before      { background: var(--bio-deep); }
+  .transfer.error::before     { background: var(--warn); }
+
+  .transfer-glyph {
+    font-family: var(--display);
+    font-size: 20px;
+    color: var(--bone-dim);
+    width: 28px;
+    text-align: center;
+  }
+  .transfer.sending   .transfer-glyph { color: var(--plasma); }
+  .transfer.receiving .transfer-glyph { color: var(--bio); }
+  .transfer.done      .transfer-glyph { color: var(--bio-deep); }
+
+  .transfer-body { min-width: 0; }
+  .transfer-name {
+    font-family: var(--ui);
+    font-size: 13px;
+    color: var(--bone);
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 6px;
+  }
+  .transfer-meta {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--bone-dim);
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .transfer-meta .divider { color: var(--bone-faint); }
+  .progress-trace {
+    height: 1px;
+    background: var(--hull);
+    margin-top: 10px;
+    position: relative;
+    overflow: hidden;
+  }
+  .progress-trace::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: var(--pct, 0%);
+    background: var(--bone-dim);
+    transition: width 0.15s linear;
+  }
+  .transfer.sending   .progress-trace::before { background: var(--plasma); box-shadow: 0 0 6px var(--plasma); }
+  .transfer.receiving .progress-trace::before { background: var(--bio); box-shadow: 0 0 6px var(--bio); }
+  .transfer.done      .progress-trace::before { background: var(--bio-deep); }
+  .transfer-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .save-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--bio);
+    text-decoration: none;
+    font-family: var(--ui);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    padding: 10px 18px;
+    border: 1px solid var(--bio);
+    border-radius: 2px;
+    transition: all 0.25s;
+    background: rgba(138, 255, 212, 0.04);
+    cursor: pointer;
+  }
+  .save-link:hover {
+    background: rgba(138, 255, 212, 0.12);
+    box-shadow: 0 0 20px var(--bio-glow);
+    text-shadow: 0 0 8px var(--bio-glow);
+  }
+  .streamed-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--bio);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  .empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--bone-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    border: 1px dashed var(--hull);
+  }
+
+  /* CHAT */
+  .chat-panel {
+    display: flex;
+    flex-direction: column;
+    background: var(--void-2);
+    border: 1px solid var(--hull);
+    height: 100%;
+    min-height: 300px;
+    max-height: 520px;
+  }
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--hull-hot) transparent;
+  }
+  .chat-messages::-webkit-scrollbar { width: 4px; }
+  .chat-messages::-webkit-scrollbar-thumb { background: var(--hull-hot); }
+  .chat-msg {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 90%;
+  }
+  .chat-msg.self { align-self: flex-end; align-items: flex-end; }
+  .chat-msg.peer { align-self: flex-start; align-items: flex-start; }
+  .chat-msg.system { align-self: center; align-items: center; max-width: 100%; }
+  .chat-who {
+    font-family: var(--mono);
+    font-size: 8px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--bone-faint);
+  }
+  .chat-msg.self .chat-who { color: var(--plasma); }
+  .chat-msg.peer .chat-who { color: var(--bio); }
+  .chat-text {
+    font-size: 13px;
+    color: var(--bone);
+    line-height: 1.5;
+    padding: 8px 12px;
+    background: var(--void-3);
+    border: 1px solid var(--hull);
+    border-radius: 2px;
+    word-wrap: break-word;
+  }
+  .chat-msg.self .chat-text { border-color: rgba(255, 122, 74, 0.2); }
+  .chat-msg.peer .chat-text { border-color: rgba(138, 255, 212, 0.2); }
+  .chat-msg.system .chat-text {
+    background: transparent;
+    border: none;
+    color: var(--bone-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 4px 8px;
+  }
+  .chat-input-row {
+    display: flex;
+    gap: 0;
+    border-top: 1px solid var(--hull);
+  }
+  .chat-input-row input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 12px 16px;
+    color: var(--bone);
+    font-family: var(--ui);
+    font-size: 13px;
+    font-weight: 300;
+    text-transform: none;
+    letter-spacing: 0.02em;
+  }
+  .chat-input-row input::placeholder {
+    color: var(--bone-faint);
+    text-transform: none;
+    letter-spacing: 0.02em;
+    font-size: 12px;
+  }
+  .chat-input-row button {
+    border: none;
+    border-left: 1px solid var(--hull);
+    border-radius: 0;
+    padding: 0 18px;
+    color: var(--bone-dim);
+  }
+  .chat-input-row button:hover:not(:disabled) {
+    color: var(--bio);
+    border-color: var(--hull-hot);
+  }
+  .chat-empty {
+    text-align: center;
+    color: var(--bone-faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    padding: 20px;
+    margin: auto;
+  }
+
+  /* LOG */
+  .log-section { max-width: 600px; margin: 0 auto; }
+  .log {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--bone-faint);
+    max-height: 120px;
+    overflow-y: auto;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--hull);
+    scrollbar-width: thin;
+    scrollbar-color: var(--hull-hot) transparent;
+  }
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-thumb { background: var(--hull-hot); }
+  .log-entry {
+    padding: 2px 0;
+    letter-spacing: 0.08em;
+    line-height: 1.6;
+  }
+  .log-entry .ts { color: var(--bone-faint); }
+  .log-entry .msg { color: var(--bone-dim); margin-left: 8px; }
+
+  /* FOOTER */
+  footer {
+    margin-top: 80px;
+    padding-top: 32px;
+    border-top: 1px solid var(--hull);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--bone-faint);
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+  }
+  .glyph-row {
+    font-family: var(--display);
+    color: var(--bone-dim);
+    letter-spacing: 0.3em;
+    font-size: 14px;
+  }
+
+  /* RESPONSIVE */
+  @media (max-width: 1100px) {
+    .hud-label { display: none; }
+  }
+  @media (max-width: 900px) {
+    .decor, .edge-ruler, .ambient-rings { display: none; }
+  }
+  @media (max-width: 640px) {
+    .app { padding: 40px 20px 64px; }
+    header { flex-direction: column; gap: 12px; margin-bottom: 48px; }
+    .meta { text-align: left; }
+    .brand { font-size: 30px; }
+    .aperture { width: 300px; height: 300px; }
+    .core-id { font-size: 26px; }
+    .link-controls { flex-direction: column; align-items: stretch; gap: 16px; }
+    .link-controls button { width: 100%; }
+    .passphrase-row { flex-direction: column; align-items: stretch; gap: 8px; }
+    .passphrase-row .input-shell { max-width: none; }
+    .drop-zone { width: 240px; height: 240px; }
+    .transfer { grid-template-columns: auto 1fr; gap: 14px; }
+    .transfer-actions { grid-column: 1 / -1; justify-content: flex-end; }
+    footer { flex-direction: column; gap: 12px; text-align: center; }
+  }
+</style>
+</head>
+<body>
+  <div class="scanline"></div>
+
+  <!-- Ambient background rotating rings -->
+  <div class="ambient-rings" aria-hidden="true">
+    <svg viewBox="-500 -500 1000 1000">
+      <g class="amb-ring-1">
+        <circle cx="0" cy="0" r="460" fill="none" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 14"/>
+        <circle class="amb-glow-node" cx="460" cy="0" r="3"/>
+        <circle class="amb-glow-node alt" cx="-460" cy="0" r="2.5"/>
+      </g>
+      <g class="amb-ring-2">
+        <circle cx="0" cy="0" r="400" fill="none" stroke="currentColor" stroke-width="0.5" stroke-dasharray="6 22"/>
+        <circle class="amb-glow-node" cx="0" cy="-400" r="2.5"/>
+        <circle class="amb-glow-node" cx="0" cy="400" r="2.5"/>
+      </g>
+      <g class="amb-ring-3">
+        <circle cx="0" cy="0" r="340" fill="none" stroke="currentColor" stroke-width="0.5" stroke-dasharray="1 10"/>
+        <circle class="amb-glow-node alt" cx="240" cy="-240" r="2"/>
+        <circle class="amb-glow-node" cx="-240" cy="240" r="2"/>
+      </g>
+      <g class="amb-ring-4">
+        <circle cx="0" cy="0" r="280" fill="none" stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 16"/>
+        <circle class="amb-glow-node" cx="280" cy="0" r="2"/>
+        <circle class="amb-glow-node" cx="-280" cy="0" r="2"/>
+        <circle class="amb-glow-node alt" cx="0" cy="280" r="2"/>
+      </g>
+      <g class="amb-ring-5">
+        <circle cx="0" cy="0" r="220" fill="none" stroke="currentColor" stroke-width="0.5" stroke-dasharray="1 6"/>
+        <circle class="amb-glow-node" cx="155" cy="155" r="1.8"/>
+        <circle class="amb-glow-node alt" cx="-155" cy="-155" r="1.8"/>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Edge rulers -->
+  <div class="edge-ruler left"></div>
+  <div class="edge-ruler right"></div>
+
+  <!-- Decor HUD layer -->
+  <div class="decor-layer" aria-hidden="true">
+    <!-- Top left: node readout -->
+    <div class="decor top-left">
+      <svg class="corner-bracket" viewBox="0 0 60 60">
+        <path d="M 2 30 L 2 2 L 30 2" fill="none" stroke="currentColor" stroke-width="1"/>
+        <circle cx="8" cy="8" r="2" fill="currentColor"/>
+        <line x1="2" y1="14" x2="8" y2="14" stroke="currentColor" stroke-width="1"/>
+        <line x1="2" y1="20" x2="5" y2="20" stroke="currentColor" stroke-width="1"/>
+        <line x1="14" y1="2" x2="14" y2="8" stroke="currentColor" stroke-width="1"/>
+        <line x1="20" y1="2" x2="20" y2="5" stroke="currentColor" stroke-width="1"/>
+      </svg>
+      <div class="readout">
+        <div class="line head">tracking node</div>
+        <div class="line" id="coordLat">N 38.2956</div>
+        <div class="line" id="coordLon">W 121.8867</div>
+        <div class="line"><span id="coordTime">00:00:00</span> utc</div>
+        <div class="line sep">— — — — —</div>
+        <div class="line">node <span class="bio" id="coordNode">—</span></div>
+        <div class="line">ch <span class="bio">07</span> · relay <span class="bio">03</span></div>
+      </div>
+    </div>
+
+    <!-- Top right: transmission integrity -->
+    <div class="decor top-right">
+      <svg class="corner-bracket" viewBox="0 0 60 60">
+        <path d="M 58 30 L 58 2 L 30 2" fill="none" stroke="currentColor" stroke-width="1"/>
+        <circle cx="52" cy="8" r="2" fill="currentColor"/>
+        <line x1="58" y1="14" x2="52" y2="14" stroke="currentColor" stroke-width="1"/>
+        <line x1="58" y1="20" x2="55" y2="20" stroke="currentColor" stroke-width="1"/>
+        <line x1="46" y1="2" x2="46" y2="8" stroke="currentColor" stroke-width="1"/>
+        <line x1="40" y1="2" x2="40" y2="5" stroke="currentColor" stroke-width="1"/>
+      </svg>
+      <div class="readout">
+        <div class="line head">tx integrity</div>
+        <div class="signal-bars">
+          <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+          <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+          <div class="bar"></div>
+        </div>
+        <div class="line bio" id="integrityReadout">99.7%</div>
+        <div class="line sep">— — — — —</div>
+        <div class="line">encrypt <span class="bio">aes</span></div>
+        <div class="line">protocol <span class="bio">webrtc</span></div>
+      </div>
+    </div>
+
+    <!-- Bottom left: sigil -->
+    <div class="decor bottom-left">
+      <svg class="corner-bracket" viewBox="0 0 60 60">
+        <path d="M 2 30 L 2 58 L 30 58" fill="none" stroke="currentColor" stroke-width="1"/>
+        <circle cx="8" cy="52" r="2" fill="currentColor"/>
+      </svg>
+      <svg class="sigil" viewBox="0 0 80 80">
+        <circle cx="40" cy="40" r="35" fill="none" stroke="currentColor" stroke-width="0.8"/>
+        <circle cx="40" cy="40" r="24" fill="none" stroke="currentColor" stroke-width="0.8"/>
+        <circle cx="40" cy="40" r="12" fill="none" stroke="currentColor" stroke-width="0.8"/>
+        <g class="outer-ring">
+          <text x="40" y="10" text-anchor="middle" class="sigil-glyph">◉</text>
+          <text x="71" y="44" text-anchor="middle" class="sigil-glyph">◎</text>
+          <text x="40" y="78" text-anchor="middle" class="sigil-glyph">◇</text>
+          <text x="9" y="44" text-anchor="middle" class="sigil-glyph">◆</text>
+          <text x="62" y="18" text-anchor="middle" class="sigil-glyph">△</text>
+          <text x="62" y="70" text-anchor="middle" class="sigil-glyph">▽</text>
+          <text x="18" y="70" text-anchor="middle" class="sigil-glyph">□</text>
+          <text x="18" y="18" text-anchor="middle" class="sigil-glyph">⧫</text>
+        </g>
+        <g class="inner-ring">
+          <circle cx="40" cy="22" r="1.5" fill="currentColor"/>
+          <circle cx="58" cy="40" r="1.5" fill="currentColor"/>
+          <circle cx="40" cy="58" r="1.5" fill="currentColor"/>
+          <circle cx="22" cy="40" r="1.5" fill="currentColor"/>
+        </g>
+        <circle cx="40" cy="40" r="2.5" class="core-dot"/>
+      </svg>
+      <div class="readout">
+        <div class="line head">sigil lock</div>
+        <div class="line bio">engaged</div>
+        <div class="line sep">— — — —</div>
+        <div class="line">pwr <span class="bio">100%</span></div>
+      </div>
+    </div>
+
+    <!-- Bottom right: constellation -->
+    <div class="decor bottom-right">
+      <svg class="corner-bracket" viewBox="0 0 60 60">
+        <path d="M 58 30 L 58 58 L 30 58" fill="none" stroke="currentColor" stroke-width="1"/>
+        <circle cx="52" cy="52" r="2" fill="currentColor"/>
+      </svg>
+      <svg class="constellation" viewBox="0 0 140 90">
+        <line x1="12" y1="68" x2="34" y2="44" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+        <line x1="34" y1="44" x2="62" y2="60" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+        <line x1="62" y1="60" x2="92" y2="32" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+        <line x1="92" y1="32" x2="122" y2="56" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+        <line x1="34" y1="44" x2="52" y2="16" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+        <line x1="52" y1="16" x2="92" y2="32" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+        <line x1="92" y1="32" x2="110" y2="10" stroke="currentColor" stroke-width="0.6" opacity="0.4"/>
+        <circle cx="12" cy="68" r="1.5" fill="currentColor"/>
+        <circle cx="34" cy="44" r="2" class="star-bright"/>
+        <circle cx="62" cy="60" r="1.5" fill="currentColor"/>
+        <circle cx="92" cy="32" r="2.2" class="star-bright"/>
+        <circle cx="122" cy="56" r="1.5" fill="currentColor"/>
+        <circle cx="52" cy="16" r="1.5" fill="currentColor"/>
+        <circle cx="110" cy="10" r="1.8" class="star-bright"/>
+      </svg>
+      <div class="readout">
+        <div class="line head">sector</div>
+        <div class="line bio">07-gamma</div>
+        <div class="line sep">— — — —</div>
+        <div class="line">vector <span class="bio">034.7°</span></div>
+      </div>
+    </div>
+
+    <!-- Mid left: secondary sigil -->
+    <div class="decor mid-left">
+      <svg class="mini-sigil" viewBox="0 0 96 96">
+        <circle cx="48" cy="48" r="44" fill="none" stroke="currentColor" stroke-width="0.6"/>
+        <circle cx="48" cy="48" r="32" fill="none" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 4"/>
+        <circle cx="48" cy="48" r="20" fill="none" stroke="currentColor" stroke-width="0.6"/>
+        <g class="ring-a">
+          <circle class="mini-dot hot" cx="48" cy="4" r="1.8"/>
+          <circle class="mini-dot" cx="92" cy="48" r="1.2"/>
+          <circle class="mini-dot hot" cx="48" cy="92" r="1.8"/>
+          <circle class="mini-dot" cx="4" cy="48" r="1.2"/>
+          <text x="70" y="22" text-anchor="middle" class="sigil-glyph">◉</text>
+          <text x="70" y="78" text-anchor="middle" class="sigil-glyph">◇</text>
+          <text x="26" y="78" text-anchor="middle" class="sigil-glyph">◎</text>
+          <text x="26" y="22" text-anchor="middle" class="sigil-glyph">⧫</text>
+        </g>
+        <g class="ring-b">
+          <circle class="mini-dot plasma" cx="48" cy="16" r="1.4"/>
+          <circle class="mini-dot hot" cx="80" cy="48" r="1.4"/>
+          <circle class="mini-dot plasma" cx="48" cy="80" r="1.4"/>
+          <circle class="mini-dot hot" cx="16" cy="48" r="1.4"/>
+        </g>
+        <g class="ring-c">
+          <line x1="48" y1="28" x2="48" y2="36" stroke="currentColor" stroke-width="0.5"/>
+          <line x1="60" y1="48" x2="68" y2="48" stroke="currentColor" stroke-width="0.5"/>
+          <line x1="48" y1="60" x2="48" y2="68" stroke="currentColor" stroke-width="0.5"/>
+          <line x1="28" y1="48" x2="36" y2="48" stroke="currentColor" stroke-width="0.5"/>
+        </g>
+        <circle cx="48" cy="48" r="2.5" class="mini-core"/>
+      </svg>
+      <div class="readout">
+        <div class="line head">vector relay</div>
+        <div class="line bio">online</div>
+        <div class="line sep">— — — —</div>
+        <div class="line">drift <span class="bio">0.02</span></div>
+      </div>
+    </div>
+    <div class="halo mid-left"></div>
+
+    <!-- Mid right: tertiary sigil -->
+    <div class="decor mid-right">
+      <svg class="mini-sigil" viewBox="0 0 96 96">
+        <circle cx="48" cy="48" r="44" fill="none" stroke="currentColor" stroke-width="0.6" stroke-dasharray="1 3"/>
+        <circle cx="48" cy="48" r="34" fill="none" stroke="currentColor" stroke-width="0.6"/>
+        <circle cx="48" cy="48" r="22" fill="none" stroke="currentColor" stroke-width="0.6" stroke-dasharray="3 6"/>
+        <g class="ring-a">
+          <circle class="mini-dot" cx="48" cy="4" r="1.2"/>
+          <circle class="mini-dot hot" cx="92" cy="48" r="1.8"/>
+          <circle class="mini-dot" cx="48" cy="92" r="1.2"/>
+          <circle class="mini-dot hot" cx="4" cy="48" r="1.8"/>
+        </g>
+        <g class="ring-b">
+          <text x="48" y="22" text-anchor="middle" class="sigil-glyph">△</text>
+          <text x="74" y="50" text-anchor="middle" class="sigil-glyph">▽</text>
+          <text x="48" y="78" text-anchor="middle" class="sigil-glyph">□</text>
+          <text x="22" y="50" text-anchor="middle" class="sigil-glyph">◆</text>
+          <circle class="mini-dot plasma" cx="70" cy="26" r="1.3"/>
+          <circle class="mini-dot plasma" cx="26" cy="70" r="1.3"/>
+        </g>
+        <g class="ring-c">
+          <circle cx="48" cy="34" r="1" fill="currentColor"/>
+          <circle cx="62" cy="48" r="1" fill="currentColor"/>
+          <circle cx="48" cy="62" r="1" fill="currentColor"/>
+          <circle cx="34" cy="48" r="1" fill="currentColor"/>
+        </g>
+        <circle cx="48" cy="48" r="2.5" class="mini-core"/>
+      </svg>
+      <div class="readout">
+        <div class="line head">beacon relay</div>
+        <div class="line bio">pinging</div>
+        <div class="line sep">— — — —</div>
+        <div class="line">phase <span class="bio">θ-2</span></div>
+      </div>
+    </div>
+    <div class="halo mid-right"></div>
+
+    <!-- Glow halos for existing corners -->
+    <div class="halo bottom-left"></div>
+    <div class="halo bottom-right"></div>
+  </div>
+
+  <!-- Floating HUD labels (edges) -->
+  <div class="hud-label hud-l1 active"><span class="dot"></span><span>sync lock</span><span class="val">stable</span></div>
+  <div class="hud-label hud-l2"><span class="dot"></span><span>thermal</span><span class="val warm">nominal</span></div>
+  <div class="hud-label hud-l3 active"><span class="dot"></span><span>channel 07</span><span class="val">clear</span></div>
+  <div class="hud-label hud-l4"><span class="dot"></span><span>buffer</span><span class="val" id="hudBuffer">—</span></div>
+  <div class="hud-label hud-l5 active"><span class="dot"></span><span>link</span><span class="val" id="hudLink">—</span></div>
+
+  <div class="hud-label hud-r1 active"><span class="dot"></span><span>encrypt</span><span class="val">aes-256</span></div>
+  <div class="hud-label hud-r2"><span class="dot"></span><span>relay 03</span><span class="val">online</span></div>
+  <div class="hud-label hud-r3 active"><span class="dot"></span><span>protocol</span><span class="val">v0.4</span></div>
+  <div class="hud-label hud-r4"><span class="dot"></span><span>latency</span><span class="val" id="hudLatency">— ms</span></div>
+  <div class="hud-label hud-r5 active"><span class="dot"></span><span>session</span><span class="val" id="hudSession">00:00</span></div>
+
+  <!-- ============ APP ============ -->
+  <div class="app">
+
+    <header>
+      <div class="brand">con<span class="glyph">duit</span></div>
+      <div class="meta">
+        <div>direct transmission</div>
+        <div>protocol <span class="v">v0.4</span></div>
+        <div class="audio-toggle" id="audioToggle">◦ audio off</div>
+      </div>
+    </header>
+
+    <div class="aperture-wrap">
+      <div class="aperture" id="aperture" data-state="idle">
+        <svg viewBox="0 0 300 300">
+          <defs>
+            <radialGradient id="sweepGradient" cx="150" cy="150" r="140" gradientUnits="userSpaceOnUse">
+              <stop offset="0%"  stop-color="#ffc266" stop-opacity="0.8" />
+              <stop offset="100%" stop-color="#ffc266" stop-opacity="0" />
+            </radialGradient>
+          </defs>
+          <g id="ring-outer-group">
+            <circle class="ring ring-outer" cx="150" cy="150" r="140" />
+            <g id="outer-ticks"></g>
+            <circle class="pip" cx="150" cy="10" r="3.5" />
+          </g>
+          <g id="ring-mid-group">
+            <circle class="ring ring-mid" cx="150" cy="150" r="115" />
+            <g id="mid-ticks"></g>
+          </g>
+          <circle class="ring ring-inner" cx="150" cy="150" r="92" />
+          <g class="radar-sweep">
+            <line x1="150" y1="150" x2="150" y2="10" />
+          </g>
+          <g class="orbital-group">
+            <g class="orbital-1">
+              <circle class="orbital-particle" cx="150" cy="20" r="2.5" />
+              <circle class="orbital-particle" cx="150" cy="280" r="2" opacity="0.6" />
+            </g>
+            <g class="orbital-2">
+              <circle class="orbital-particle" cx="38" cy="150" r="2" />
+              <circle class="orbital-particle" cx="262" cy="150" r="1.5" opacity="0.5" />
+            </g>
+            <g class="orbital-3">
+              <circle class="orbital-particle" cx="220" cy="80" r="1.5" />
+              <circle class="orbital-particle" cx="80" cy="220" r="1.5" opacity="0.7" />
+            </g>
+          </g>
+          <circle class="core-disc" cx="150" cy="150" r="84" />
+        </svg>
+        <div class="aperture-core">
+          <div class="core-label">peer signature</div>
+          <div class="core-id" id="myId">– – – – – –</div>
+          <div class="core-status">
+            <span class="dot"></span><span id="statusText">booting</span>
+          </div>
+          <div class="aperture-actions">
+            <button class="ghost" id="copyIdBtn" disabled>copy</button>
+            <button class="ghost" id="qrBtn" disabled>qr</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reconnect banner -->
+    <div class="reconnect-banner" id="reconnectBanner">
+      <span>last linked peer: <span class="label" id="reconnectPeer">—</span></span>
+      <div style="display:flex;gap:8px;">
+        <button id="reconnectBtn" class="primary">reconnect</button>
+        <button id="reconnectDismiss" class="ghost">dismiss</button>
+      </div>
+    </div>
+
+    <div class="link-controls-wrap">
+      <div class="link-controls">
+        <div class="input-shell">
+          <input type="text" id="peerInput" placeholder="enter peer signature" autocomplete="off" spellcheck="false" maxlength="12" />
+        </div>
+        <button id="connectBtn" class="primary" disabled>establish link</button>
+        <button id="disconnectBtn" disabled>drop</button>
+      </div>
+      <div class="passphrase-row">
+        <span>optional keyphrase</span>
+        <div class="input-shell">
+          <input type="password" id="passInput" placeholder="shared secret" autocomplete="off" spellcheck="false" />
+        </div>
+      </div>
+    </div>
+
+    <div class="drop-section" style="margin-top: 56px;">
+      <div class="section-title">outbound channel</div>
+      <div class="drop-zone disabled" id="dropzone">
+        <svg viewBox="0 0 300 300">
+          <polygon class="drop-hex" points="150,20 265,85 265,215 150,280 35,215 35,85" />
+          <polygon class="drop-hex-inner" points="150,60 230,105 230,195 150,240 70,195 70,105" />
+          <g class="drop-arrow" transform="translate(150,150)">
+            <path d="M 0,-28 L 18,-6 L 8,-6 L 8,22 L -8,22 L -8,-6 L -18,-6 Z" />
+          </g>
+        </svg>
+        <div class="drop-label">
+          <div class="primary">drop or click</div>
+          <div class="secondary" id="dropHint">link required</div>
+        </div>
+      </div>
+      <input type="file" id="fileInput" multiple style="display:none" />
+    </div>
+
+    <div class="split">
+      <div>
+        <div class="section-title">transfer manifest</div>
+        <div class="transfers" id="transfers">
+          <div class="empty" id="emptyState">no transmissions logged</div>
+        </div>
+      </div>
+      <div>
+        <div class="section-title">channel comms</div>
+        <div class="chat-panel">
+          <div class="chat-messages" id="chatMessages">
+            <div class="chat-empty" id="chatEmpty">link required</div>
+          </div>
+          <div class="chat-input-row">
+            <input type="text" id="chatInput" placeholder="transmit message..." disabled />
+            <button id="chatSendBtn" disabled>send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="log-section">
+      <div class="log" id="log"></div>
+    </div>
+
+    <footer>
+      <div>webrtc · p2p · zero server storage</div>
+      <div class="glyph-row">◎ ◦ ◉ ◦ ◎</div>
+    </footer>
+  </div>
+
+  <!-- QR overlay -->
+  <div class="overlay" id="qrOverlay">
+    <div class="overlay-card">
+      <canvas id="qrCanvas"></canvas>
+      <div class="overlay-label">scan to pair</div>
+      <button id="qrCloseBtn">close</button>
+    </div>
+  </div>
+
+  <!-- Huge-file accept overlay -->
+  <div class="overlay" id="acceptOverlay">
+    <div class="overlay-card">
+      <div class="overlay-title">incoming transmission</div>
+      <div class="overlay-body" id="acceptBody">
+        <strong id="acceptName">—</strong><br>
+        <span id="acceptSize">—</span>
+      </div>
+      <div class="overlay-actions">
+        <button id="acceptStreamBtn" class="primary">stream to disk</button>
+        <button id="acceptRejectBtn" class="warn">reject</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* =========================================================
+   CONDUIT v0.4 — P2P file transfer via WebRTC
+   ========================================================= */
+
+const CHUNK_SIZE       = 64 * 1024;
+const MAX_BUFFERED     = 16 * 1024 * 1024;
+const SPEED_WINDOW     = 1500;
+const STREAM_THRESHOLD = 2 * 1024 * 1024 * 1024; // 2 GB → StreamSaver path
+const ID_PREFIX        = 'cdt-';
+const ID_ALPHABET      = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ID_LENGTH        = 6;
+const CLAIM_ATTEMPTS   = 6;
+const LS_MYID          = 'cdt-myid-v1';
+const LS_LASTPEER      = 'cdt-lastpeer-v1';
+
+// ---------- State ----------
+const state = {
+  peer: null,
+  conn: null,
+  myId: null,
+  myFullId: null,
+  connected: false,
+  authed: false,
+  passphrase: '',
+  incoming: new Map(),
+  transfers: new Map(),
+  _currentIncomingId: null,
+  cancelled: new Set(),
+  _pendingAccept: null,
+  isInitiator: false,
+  sessionStart: Date.now(),
+};
+
+// ---------- DOM ----------
+const $ = (id) => document.getElementById(id);
+const els = {
+  aperture:        $('aperture'),
+  myId:            $('myId'),
+  statusText:      $('statusText'),
+  copyIdBtn:       $('copyIdBtn'),
+  qrBtn:           $('qrBtn'),
+  peerInput:       $('peerInput'),
+  passInput:       $('passInput'),
+  connectBtn:      $('connectBtn'),
+  disconnectBtn:   $('disconnectBtn'),
+  dropzone:        $('dropzone'),
+  dropHint:        $('dropHint'),
+  fileInput:       $('fileInput'),
+  transfers:       $('transfers'),
+  emptyState:      $('emptyState'),
+  log:             $('log'),
+  qrOverlay:       $('qrOverlay'),
+  qrCanvas:        $('qrCanvas'),
+  qrCloseBtn:      $('qrCloseBtn'),
+  chatMessages:    $('chatMessages'),
+  chatEmpty:       $('chatEmpty'),
+  chatInput:       $('chatInput'),
+  chatSendBtn:     $('chatSendBtn'),
+  audioToggle:     $('audioToggle'),
+  acceptOverlay:   $('acceptOverlay'),
+  acceptName:      $('acceptName'),
+  acceptSize:      $('acceptSize'),
+  acceptStreamBtn: $('acceptStreamBtn'),
+  acceptRejectBtn: $('acceptRejectBtn'),
+  reconnectBanner: $('reconnectBanner'),
+  reconnectPeer:   $('reconnectPeer'),
+  reconnectBtn:    $('reconnectBtn'),
+  reconnectDismiss:$('reconnectDismiss'),
+  // HUD
+  coordLat:    $('coordLat'),
+  coordLon:    $('coordLon'),
+  coordTime:   $('coordTime'),
+  coordNode:   $('coordNode'),
+  hudLink:     $('hudLink'),
+  hudBuffer:   $('hudBuffer'),
+  hudLatency:  $('hudLatency'),
+  hudSession:  $('hudSession'),
+  integrityReadout: $('integrityReadout'),
+};
+
+/* =========================================================
+   AUDIO ENGINE
+   ========================================================= */
+const audio = {
+  ctx: null,
+  enabled: false,
+  master: null,
+
+  init() {
+    if (this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.25;
+    this.master.connect(this.ctx.destination);
+  },
+
+  toggle() {
+    if (!this.ctx) this.init();
+    this.enabled = !this.enabled;
+    if (this.enabled && this.ctx.state === 'suspended') this.ctx.resume();
+    return this.enabled;
+  },
+
+  _env(node, attack, decay, peak = 1) {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    node.gain.cancelScheduledValues(now);
+    node.gain.setValueAtTime(0, now);
+    node.gain.linearRampToValueAtTime(peak, now + attack);
+    node.gain.exponentialRampToValueAtTime(0.001, now + attack + decay);
+  },
+
+  _tone(freq, dur, type = 'sine', peak = 0.5) {
+    if (!this.enabled || !this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    osc.connect(g);
+    g.connect(this.master);
+    this._env(g, 0.005, dur, peak);
+    osc.start();
+    osc.stop(this.ctx.currentTime + dur + 0.05);
+  },
+
+  chimeConnect() {
+    if (!this.enabled) return;
+    const notes = [440, 554.37, 659.25, 880];
+    notes.forEach((f, i) => setTimeout(() => this._tone(f, 0.7, 'triangle', 0.35), i * 80));
+  },
+
+  chimeDisconnect() {
+    if (!this.enabled) return;
+    const notes = [659.25, 523.25, 440];
+    notes.forEach((f, i) => setTimeout(() => this._tone(f, 0.5, 'triangle', 0.3), i * 100));
+  },
+
+  fileStart() {
+    if (!this.enabled || !this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 400;
+    osc.type = 'sawtooth';
+    osc.frequency.value = 220;
+    const now = this.ctx.currentTime;
+    filter.frequency.exponentialRampToValueAtTime(2000, now + 0.3);
+    osc.connect(filter);
+    filter.connect(g);
+    g.connect(this.master);
+    this._env(g, 0.01, 0.3, 0.25);
+    osc.start();
+    osc.stop(now + 0.4);
+  },
+
+  fileDone() {
+    if (!this.enabled) return;
+    this._tone(880, 0.15, 'sine', 0.3);
+    setTimeout(() => this._tone(1318.5, 0.25, 'sine', 0.3), 60);
+  },
+
+  chatTick() {
+    if (!this.enabled || !this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = 1800;
+    osc.connect(g);
+    g.connect(this.master);
+    this._env(g, 0.002, 0.06, 0.1);
+    osc.start();
+    osc.stop(this.ctx.currentTime + 0.1);
+  },
+
+  error() {
+    if (!this.enabled) return;
+    this._tone(220, 0.3, 'sawtooth', 0.3);
+    setTimeout(() => this._tone(165, 0.4, 'sawtooth', 0.3), 80);
+  },
+};
+
+/* =========================================================
+   UTILITIES
+   ========================================================= */
+function $log(msg) {
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  const t = new Date().toTimeString().slice(0, 8);
+  entry.innerHTML = `<span class="ts">${t}</span><span class="msg"></span>`;
+  entry.querySelector('.msg').textContent = msg;
+  els.log.appendChild(entry);
+  els.log.scrollTop = els.log.scrollHeight;
+}
+
+function setApertureState(stateName, statusLabel) {
+  els.aperture.setAttribute('data-state', stateName);
+  els.statusText.textContent = statusLabel;
+  if (els.hudLink) {
+    els.hudLink.textContent =
+      stateName === 'locked'    ? 'active'
+    : stateName === 'searching' ? 'seeking'
+    : stateName === 'error'     ? 'fault'
+    :                             'standby';
+  }
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+function fmtSpeed(bps) { return fmtBytes(bps) + '/s'; }
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+function randomCode() {
+  let code = '';
+  for (let i = 0; i < ID_LENGTH; i++) {
+    code += ID_ALPHABET[Math.floor(Math.random() * ID_ALPHABET.length)];
+  }
+  return code;
+}
+
+async function sha256Hex(str) {
+  const buf = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* =========================================================
+   APERTURE TICKS
+   ========================================================= */
+function generateTicks() {
+  const outer = document.getElementById('outer-ticks');
+  const mid = document.getElementById('mid-ticks');
+  const svgNS = 'http://www.w3.org/2000/svg';
+  for (let i = 0; i < 60; i++) {
+    const angle = (i * 6) * Math.PI / 180;
+    const r1 = 140;
+    const r2 = i % 5 === 0 ? 132 : 136;
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('x1', 150 + Math.sin(angle) * r1);
+    line.setAttribute('y1', 150 - Math.cos(angle) * r1);
+    line.setAttribute('x2', 150 + Math.sin(angle) * r2);
+    line.setAttribute('y2', 150 - Math.cos(angle) * r2);
+    line.setAttribute('class', i % 5 === 0 ? 'tick tick-major' : 'tick');
+    outer.appendChild(line);
+  }
+  for (let i = 0; i < 24; i++) {
+    const angle = (i * 15) * Math.PI / 180;
+    const r1 = 115, r2 = 109;
+    const line = document.createElementNS(svgNS, 'line');
+    line.setAttribute('x1', 150 + Math.sin(angle) * r1);
+    line.setAttribute('y1', 150 - Math.cos(angle) * r1);
+    line.setAttribute('x2', 150 + Math.sin(angle) * r2);
+    line.setAttribute('y2', 150 - Math.cos(angle) * r2);
+    line.setAttribute('class', 'tick');
+    mid.appendChild(line);
+  }
+}
+
+/* =========================================================
+   PEER SETUP WITH PERSISTENCE
+   ========================================================= */
+async function tryClaimCode(code) {
+  const fullId = ID_PREFIX + code;
+  const peer = new Peer(fullId, { debug: 1 });
+  return new Promise((resolve) => {
+    let done = false;
+    const onOpen = () => {
+      if (done) return;
+      done = true;
+      peer.off('open', onOpen);
+      peer.off('error', onError);
+      resolve({ ok: true, peer, code, fullId });
+    };
+    const onError = (err) => {
+      if (done) return;
+      if (err.type === 'unavailable-id') {
+        done = true;
+        peer.off('open', onOpen);
+        peer.off('error', onError);
+        peer.destroy();
+        resolve({ ok: false });
+      } else {
+        done = true;
+        peer.off('open', onOpen);
+        peer.off('error', onError);
+        resolve({ ok: false, fatal: err });
+      }
+    };
+    peer.on('open', onOpen);
+    peer.on('error', onError);
+  });
+}
+
+async function claimShortCode() {
+  // Try saved id first
+  const savedId = localStorage.getItem(LS_MYID);
+  if (savedId && /^[A-Z0-9]{6}$/.test(savedId)) {
+    const res = await tryClaimCode(savedId);
+    if (res.ok) return res;
+    if (res.fatal) throw res.fatal;
+  }
+  // Otherwise try fresh random codes
+  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+    const res = await tryClaimCode(randomCode());
+    if (res.ok) return res;
+    if (res.fatal) throw res.fatal;
+  }
+  throw new Error('Could not claim a signature');
+}
+
+async function initPeer() {
+  setApertureState('searching', 'claiming signature');
+  $log('initializing peer node...');
+  try {
+    const { peer, code, fullId } = await claimShortCode();
+    state.peer = peer;
+    state.myId = code;
+    state.myFullId = fullId;
+    localStorage.setItem(LS_MYID, code);
+    els.myId.textContent = code;
+    els.coordNode.textContent = code;
+    els.copyIdBtn.disabled = false;
+    els.qrBtn.disabled = false;
+    els.connectBtn.disabled = false;
+    setApertureState('idle', 'standing by');
+    $log(`peer node ready: ${code}`);
+
+    peer.on('connection', (conn) => {
+      $log(`incoming link from ${conn.peer.replace(ID_PREFIX, '')}`);
+      state.isInitiator = false;
+      attachConnection(conn);
+    });
+
+    peer.on('error', (err) => {
+      $log(`error: ${err.type || err.message}`);
+      audio.error();
+      if (err.type === 'peer-unavailable') {
+        setApertureState('error', 'peer not found');
+        setTimeout(() => {
+          if (!state.connected) setApertureState('idle', 'standing by');
+        }, 2500);
+      } else {
+        setApertureState('error', `error: ${err.type || 'unknown'}`);
+      }
+    });
+
+    peer.on('disconnected', () => {
+      $log('disconnected from relay');
+      setApertureState('error', 'relay lost');
+    });
+
+    // Offer reconnect to last peer
+    const last = localStorage.getItem(LS_LASTPEER);
+    if (last && last !== code && /^[A-Z0-9]{6}$/.test(last)) {
+      els.reconnectPeer.textContent = last;
+      els.reconnectBanner.classList.add('show');
+    }
+  } catch (err) {
+    $log('failed to init: ' + (err.message || err));
+    setApertureState('error', 'init failed');
+  }
+}
+
+/* =========================================================
+   CONNECTION + AUTH
+   ========================================================= */
+function attachConnection(conn) {
+  state.conn = conn;
+  state.authed = false;
+  setApertureState('searching', `linking ${conn.peer.replace(ID_PREFIX, '')}`);
+
+  conn.on('open', async () => {
+    $log(`channel open: ${conn.peer.replace(ID_PREFIX, '')}`);
+    const pass = state.passphrase || '';
+    const hash = await sha256Hex('CONDUIT_AUTH:' + pass);
+    conn.send({ type: 'auth', hash });
+  });
+
+  conn.on('data', handleIncoming);
+
+  conn.on('close', () => {
+    const wasConnected = state.connected;
+    state.connected = false;
+    state.authed = false;
+    state.conn = null;
+    setApertureState('idle', 'standing by');
+    $log('channel closed');
+    els.dropzone.classList.add('disabled');
+    els.dropHint.textContent = 'link required';
+    els.connectBtn.disabled = false;
+    els.disconnectBtn.disabled = true;
+    els.peerInput.disabled = false;
+    els.peerInput.value = '';
+    els.chatInput.disabled = true;
+    els.chatSendBtn.disabled = true;
+    if (wasConnected) {
+      audio.chimeDisconnect();
+      addChatSystem('channel closed');
+    }
+  });
+
+  conn.on('error', (err) => {
+    $log(`conn error: ${err.message || err}`);
+  });
+}
+
+function onAuthSuccess() {
+  state.connected = true;
+  state.authed = true;
+  setApertureState('locked', 'linked');
+  $log('link established');
+  audio.chimeConnect();
+  els.dropzone.classList.remove('disabled');
+  els.dropHint.textContent = 'ready to transmit';
+  els.connectBtn.disabled = true;
+  els.disconnectBtn.disabled = false;
+  els.peerInput.disabled = true;
+  els.chatInput.disabled = false;
+  els.chatSendBtn.disabled = false;
+  if (els.chatEmpty) { els.chatEmpty.remove(); els.chatEmpty = null; }
+  addChatSystem('channel established');
+  // Save last peer
+  if (state.conn) {
+    const peerCode = state.conn.peer.replace(ID_PREFIX, '');
+    localStorage.setItem(LS_LASTPEER, peerCode);
+  }
+  // Hide reconnect banner since we're now connected
+  els.reconnectBanner.classList.remove('show');
+}
+
+function onAuthFail() {
+  $log('auth failed: keyphrase mismatch');
+  audio.error();
+  alert('Keyphrase mismatch.\n\nBoth parties must enter the same optional keyphrase (or both leave it blank).');
+  if (state.conn) state.conn.close();
+}
+
+/* =========================================================
+   INCOMING HANDLER — RACE-SAFE
+   ========================================================= */
+async function handleIncoming(data) {
+  // Binary chunk during active file
+  if (data instanceof ArrayBuffer) {
+    const currentId = state._currentIncomingId;
+    if (!currentId) return;
+    const meta = state.incoming.get(currentId);
+    if (!meta) return;
+
+    meta.received += data.byteLength;
+    sampleSpeed(meta, data.byteLength);
+    updateTransferProgress(currentId, meta.received, meta.size, meta.speed);
+
+    if (meta.setupPending) {
+      // Queue chunks until beginReceive finishes async setup
+      meta.pendingChunks.push(data);
+      return;
+    }
+
+    if (meta.writer) {
+      try {
+        await meta.writer.write(new Uint8Array(data));
+      } catch (e) {
+        $log('stream write failed: ' + e.message);
+      }
+    } else {
+      meta.chunks.push(data);
+    }
+    return;
+  }
+
+  // Control message
+  try {
+    const msg = typeof data === 'string' ? JSON.parse(data) : data;
+
+    if (msg.type === 'auth') {
+      const pass = state.passphrase || '';
+      const myHash = await sha256Hex('CONDUIT_AUTH:' + pass);
+      if (myHash === msg.hash) {
+        state.conn.send({ type: 'auth-ok' });
+      } else {
+        state.conn.send({ type: 'auth-fail' });
+        setTimeout(onAuthFail, 100);
+      }
+      return;
+    }
+    if (msg.type === 'auth-ok') {
+      if (!state.authed) onAuthSuccess();
+      return;
+    }
+    if (msg.type === 'auth-fail') {
+      onAuthFail();
+      return;
+    }
+
+    if (msg.type === 'file-start') {
+      await beginReceive(msg);
+    } else if (msg.type === 'file-end') {
+      await endReceive(msg.id);
+    } else if (msg.type === 'file-cancel') {
+      const meta = state.incoming.get(msg.id);
+      if (meta) {
+        if (meta.writer) { try { await meta.writer.abort(); } catch (e) {} }
+        markTransferError(msg.id, 'cancelled');
+        state.incoming.delete(msg.id);
+        state._currentIncomingId = null;
+        $log(`sender cancelled: ${meta.name}`);
+      }
+      return;
+    }
+
+    if (msg.type === 'chat') {
+      addChatMessage('peer', msg.text);
+      audio.chatTick();
+      return;
+    }
+  } catch (e) {
+    $log(`bad message: ${e.message}`);
+  }
+}
+
+async function beginReceive(msg) {
+  const needsStream = msg.size > STREAM_THRESHOLD;
+
+  // Create meta FIRST so incoming chunks have a home, even during async setup
+  const meta = {
+    name: msg.name,
+    size: msg.size,
+    mimeType: msg.mimeType,
+    chunks: [],
+    pendingChunks: [],
+    setupPending: true,
+    received: 0,
+    startedAt: performance.now(),
+    speedSamples: [],
+    speed: 0,
+    writer: null,
+  };
+  state.incoming.set(msg.id, meta);
+  state._currentIncomingId = msg.id;
+  createTransferRow(msg.id, msg.name, msg.size, 'receiving');
+  $log(`inbound: ${msg.name} (${fmtBytes(msg.size)})`);
+  audio.fileStart();
+
+  if (needsStream) {
+    const accepted = await new Promise((resolve) => {
+      state._pendingAccept = resolve;
+      els.acceptName.textContent = msg.name;
+      els.acceptSize.textContent = fmtBytes(msg.size);
+      els.acceptOverlay.classList.add('open');
+    });
+    if (!accepted) {
+      try { state.conn.send({ type: 'file-reject', id: msg.id }); } catch (e) {}
+      markTransferError(msg.id, 'rejected');
+      state.incoming.delete(msg.id);
+      state._currentIncomingId = null;
+      return;
+    }
+    try {
+      const fileStream = streamSaver.createWriteStream(msg.name, { size: msg.size });
+      meta.writer = fileStream.getWriter();
+      $log(`streaming to disk: ${msg.name}`);
+    } catch (e) {
+      $log('streamsaver failed, using memory: ' + e.message);
+      meta.writer = null;
+    }
+  }
+
+  // Setup complete — drain any chunks that arrived during the await
+  meta.setupPending = false;
+  const pending = meta.pendingChunks;
+  meta.pendingChunks = [];
+  for (const chunk of pending) {
+    if (meta.writer) {
+      try {
+        await meta.writer.write(new Uint8Array(chunk));
+      } catch (e) {
+        $log('stream write failed: ' + e.message);
+      }
+    } else {
+      meta.chunks.push(chunk);
+    }
+  }
+}
+
+async function endReceive(id) {
+  const meta = state.incoming.get(id);
+  if (!meta) return;
+
+  // If setup is still pending for some reason, wait briefly
+  let waits = 0;
+  while (meta.setupPending && waits < 50) {
+    await new Promise(r => setTimeout(r, 20));
+    waits++;
+  }
+
+  if (meta.writer) {
+    try {
+      await meta.writer.close();
+      markTransferDone(id);
+      const rec = state.transfers.get(id);
+      if (rec) {
+        const actions = rec.row.querySelector('.transfer-actions');
+        actions.innerHTML = '<span class="streamed-label">✓ saved to disk</span>';
+      }
+    } catch (e) {
+      $log('stream close failed: ' + e.message);
+      markTransferError(id, 'save failed');
+    }
+  } else {
+    const blob = new Blob(meta.chunks, { type: meta.mimeType || 'application/octet-stream' });
+    finalizeTransfer(id, blob, meta.name);
+  }
+  state.incoming.delete(id);
+  state._currentIncomingId = null;
+  $log(`received: ${meta.name}`);
+  audio.fileDone();
+}
+
+function sampleSpeed(meta, bytes) {
+  const now = performance.now();
+  meta.speedSamples.push({ t: now, b: bytes });
+  const cutoff = now - SPEED_WINDOW;
+  while (meta.speedSamples.length && meta.speedSamples[0].t < cutoff) {
+    meta.speedSamples.shift();
+  }
+  const totalB = meta.speedSamples.reduce((s, x) => s + x.b, 0);
+  const span = Math.max(1, now - meta.speedSamples[0].t);
+  meta.speed = (totalB / span) * 1000;
+}
+
+/* =========================================================
+   OUTGOING
+   ========================================================= */
+async function sendFile(file) {
+  if (!state.connected || !state.conn) return;
+  const id = uid();
+  const outMeta = { startedAt: performance.now(), speedSamples: [], speed: 0 };
+  createTransferRow(id, file.name, file.size, 'sending');
+  $log(`outbound: ${file.name} (${fmtBytes(file.size)})`);
+  audio.fileStart();
+
+  state.conn.send({
+    type: 'file-start',
+    id,
+    name: file.name,
+    size: file.size,
+    mimeType: file.type,
+  });
+
+  let offset = 0;
+  while (offset < file.size) {
+    if (state.cancelled.has(id)) {
+      state.conn.send({ type: 'file-cancel', id });
+      markTransferError(id, 'cancelled');
+      state.cancelled.delete(id);
+      $log(`cancelled: ${file.name}`);
+      return;
+    }
+    const dc = state.conn.dataChannel;
+    if (dc && dc.bufferedAmount > MAX_BUFFERED) {
+      await new Promise((r) => setTimeout(r, 20));
+      continue;
+    }
+    const slice = file.slice(offset, offset + CHUNK_SIZE);
+    const buf = await slice.arrayBuffer();
+    state.conn.send(buf);
+    offset += buf.byteLength;
+    sampleSpeed(outMeta, buf.byteLength);
+    updateTransferProgress(id, offset, file.size, outMeta.speed);
+  }
+
+  state.conn.send({ type: 'file-end', id });
+  markTransferDone(id);
+  $log(`sent: ${file.name}`);
+  audio.fileDone();
+}
+
+async function sendFolder(files) {
+  if (files.length === 0) return;
+  const rootName = files[0].webkitRelativePath.split('/')[0] || 'folder';
+  const zipName = rootName + '.zip';
+  $log(`zipping folder: ${rootName} (${files.length} files)`);
+
+  const zip = new JSZip();
+  for (const f of files) {
+    const path = f.webkitRelativePath || f.name;
+    zip.file(path, f);
+  }
+
+  const placeholderId = uid();
+  createTransferRow(placeholderId, zipName + ' (zipping...)', 0, 'sending');
+  const rec = state.transfers.get(placeholderId);
+
+  const blob = await zip.generateAsync(
+    { type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } },
+    (meta) => {
+      if (rec) {
+        rec.row.querySelector('.progress-trace').style.setProperty('--pct', meta.percent.toFixed(1) + '%');
+        rec.row.querySelector('.pct').textContent = 'zip ' + meta.percent.toFixed(0) + '%';
+      }
+    }
+  );
+
+  if (rec) {
+    rec.row.remove();
+    state.transfers.delete(placeholderId);
+  }
+
+  const zipFile = new File([blob], zipName, { type: 'application/zip' });
+  await sendFile(zipFile);
+}
+
+/* =========================================================
+   TRANSFER UI
+   ========================================================= */
+function createTransferRow(id, name, size, mode) {
+  if (els.emptyState) { els.emptyState.remove(); els.emptyState = null; }
+  const row = document.createElement('div');
+  row.className = `transfer ${mode}`;
+  const glyph = mode === 'sending' ? '↑' : '↓';
+  row.innerHTML = `
+    <div class="transfer-glyph">${glyph}</div>
+    <div class="transfer-body">
+      <div class="transfer-name"></div>
+      <div class="transfer-meta">
+        <span class="pct">0%</span>
+        <span class="divider">·</span>
+        <span class="size">${fmtBytes(0)} / ${fmtBytes(size)}</span>
+        <span class="divider">·</span>
+        <span class="speed">—</span>
+      </div>
+      <div class="progress-trace"></div>
+    </div>
+    <div class="transfer-actions">
+      ${mode === 'sending' ? '<button class="ghost warn" data-action="cancel">cancel</button>' : ''}
+    </div>
+  `;
+  row.querySelector('.transfer-name').textContent = name;
+  const cancelBtn = row.querySelector('[data-action="cancel"]');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => { state.cancelled.add(id); });
+  }
+  els.transfers.prepend(row);
+  state.transfers.set(id, { row, size });
+}
+
+function updateTransferProgress(id, current, total, speed) {
+  const rec = state.transfers.get(id);
+  if (!rec) return;
+  const row = rec.row;
+  const pct = total > 0 ? Math.min(100, (current / total) * 100) : 0;
+  row.querySelector('.progress-trace').style.setProperty('--pct', pct.toFixed(1) + '%');
+  row.querySelector('.pct').textContent = pct.toFixed(1) + '%';
+  row.querySelector('.size').textContent = fmtBytes(current) + ' / ' + fmtBytes(total);
+  if (speed && speed > 0) {
+    row.querySelector('.speed').textContent = fmtSpeed(speed);
+  }
+}
+
+function markTransferDone(id) {
+  const rec = state.transfers.get(id);
+  if (!rec) return;
+  const row = rec.row;
+  row.classList.remove('sending', 'receiving');
+  row.classList.add('done');
+  row.querySelector('.transfer-glyph').textContent = '◉';
+  row.querySelector('.progress-trace').style.setProperty('--pct', '100%');
+  row.querySelector('.pct').textContent = 'complete';
+  row.querySelector('.speed').textContent = '';
+  row.querySelector('.transfer-actions').innerHTML = '';
+}
+
+function markTransferError(id, reason) {
+  const rec = state.transfers.get(id);
+  if (!rec) return;
+  const row = rec.row;
+  row.classList.remove('sending', 'receiving');
+  row.classList.add('error');
+  row.querySelector('.transfer-glyph').textContent = '×';
+  row.querySelector('.pct').textContent = reason || 'error';
+  row.querySelector('.speed').textContent = '';
+  row.querySelector('.transfer-actions').innerHTML = '';
+}
+
+function finalizeTransfer(id, blob, name) {
+  const rec = state.transfers.get(id);
+  if (!rec) return;
+  const row = rec.row;
+  markTransferDone(id);
+  const url = URL.createObjectURL(blob);
+
+  // Main prominent save button
+  const saveBtn = document.createElement('a');
+  saveBtn.href = url;
+  saveBtn.download = name;
+  saveBtn.className = 'save-link';
+  saveBtn.textContent = '↓ save file';
+  row.querySelector('.transfer-actions').appendChild(saveBtn);
+
+  // Auto-trigger once (user may still click manually if browser blocks)
+  setTimeout(() => {
+    try { saveBtn.click(); } catch (e) {}
+  }, 100);
+}
+
+/* =========================================================
+   CHAT
+   ========================================================= */
+function addChatMessage(who, text) {
+  if (els.chatEmpty) { els.chatEmpty.remove(); els.chatEmpty = null; }
+  const msg = document.createElement('div');
+  msg.className = `chat-msg ${who}`;
+  msg.innerHTML = `
+    <div class="chat-who">${who === 'self' ? '↑ you' : '↓ peer'}</div>
+    <div class="chat-text"></div>
+  `;
+  msg.querySelector('.chat-text').textContent = text;
+  els.chatMessages.appendChild(msg);
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function addChatSystem(text) {
+  if (els.chatEmpty) { els.chatEmpty.remove(); els.chatEmpty = null; }
+  const msg = document.createElement('div');
+  msg.className = 'chat-msg system';
+  msg.innerHTML = `<div class="chat-text">— ${text} —</div>`;
+  els.chatMessages.appendChild(msg);
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function sendChat() {
+  const text = els.chatInput.value.trim();
+  if (!text || !state.connected) return;
+  state.conn.send({ type: 'chat', text });
+  addChatMessage('self', text);
+  els.chatInput.value = '';
+  audio.chatTick();
+}
+
+/* =========================================================
+   QR
+   ========================================================= */
+function showQR() {
+  if (!state.myId) return;
+  QRCode.toCanvas(els.qrCanvas, state.myId, {
+    width: 240, margin: 1,
+    color: { dark: '#8affd4', light: '#00000000' },
+    errorCorrectionLevel: 'M',
+  }, (err) => { if (err) $log('qr error: ' + err.message); });
+  els.qrOverlay.classList.add('open');
+}
+
+/* =========================================================
+   HUD LIVE UPDATES
+   ========================================================= */
+function fakeCoords() {
+  // Stable per session
+  const lat = (30 + Math.random() * 20).toFixed(4);
+  const lon = (100 + Math.random() * 30).toFixed(4);
+  els.coordLat.textContent = 'N ' + lat;
+  els.coordLon.textContent = 'W ' + lon;
+}
+
+function tickHud() {
+  const now = new Date();
+  els.coordTime.textContent = now.toUTCString().slice(17, 25);
+
+  // Session timer
+  const sec = Math.floor((Date.now() - state.sessionStart) / 1000);
+  const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+  const ss = String(sec % 60).padStart(2, '0');
+  if (els.hudSession) els.hudSession.textContent = mm + ':' + ss;
+
+  // Buffer indicator
+  if (state.conn && state.conn.dataChannel) {
+    const buf = state.conn.dataChannel.bufferedAmount;
+    if (els.hudBuffer) els.hudBuffer.textContent = fmtBytes(buf);
+  } else {
+    if (els.hudBuffer) els.hudBuffer.textContent = '—';
+  }
+
+  // Fake latency for HUD vibe
+  if (els.hudLatency) {
+    if (state.connected) {
+      els.hudLatency.textContent = Math.round(18 + Math.random() * 14) + ' ms';
+    } else {
+      els.hudLatency.textContent = '— ms';
+    }
+  }
+
+  // Integrity oscillation
+  if (els.integrityReadout) {
+    const base = state.connected ? 99.7 : 0.0;
+    const jitter = state.connected ? (Math.random() - 0.5) * 0.3 : 0;
+    els.integrityReadout.textContent = (base + jitter).toFixed(1) + '%';
+  }
+}
+
+/* =========================================================
+   EVENT WIRING
+   ========================================================= */
+els.audioToggle.addEventListener('click', () => {
+  const on = audio.toggle();
+  els.audioToggle.textContent = on ? '◉ audio on' : '◦ audio off';
+  els.audioToggle.classList.toggle('on', on);
+  if (on) audio._tone(880, 0.1, 'sine', 0.2);
+});
+
+els.copyIdBtn.addEventListener('click', async () => {
+  if (!state.myId) return;
+  try {
+    await navigator.clipboard.writeText(state.myId);
+    const orig = els.copyIdBtn.textContent;
+    els.copyIdBtn.textContent = 'copied';
+    setTimeout(() => (els.copyIdBtn.textContent = orig), 1200);
+  } catch (e) {
+    $log('clipboard blocked');
+  }
+});
+
+els.qrBtn.addEventListener('click', showQR);
+els.qrCloseBtn.addEventListener('click', () => els.qrOverlay.classList.remove('open'));
+els.qrOverlay.addEventListener('click', (e) => {
+  if (e.target === els.qrOverlay) els.qrOverlay.classList.remove('open');
+});
+
+els.passInput.addEventListener('input', () => {
+  state.passphrase = els.passInput.value;
+});
+
+function dialPeer(rawCode) {
+  const code = rawCode.toUpperCase().replace(/^CDT-/i, '');
+  if (!code) return;
+  if (code === state.myId) {
+    alert('Cannot link to your own signature.');
+    return;
+  }
+  const target = ID_PREFIX + code;
+  state.passphrase = els.passInput.value;
+  state.isInitiator = true;
+  $log(`dialing ${code}...`);
+  setApertureState('searching', 'establishing link');
+  const conn = state.peer.connect(target, { reliable: true });
+  attachConnection(conn);
+}
+
+els.connectBtn.addEventListener('click', () => {
+  dialPeer(els.peerInput.value.trim());
+});
+
+els.disconnectBtn.addEventListener('click', () => {
+  if (state.conn) state.conn.close();
+});
+
+els.peerInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !els.connectBtn.disabled) els.connectBtn.click();
+});
+
+els.chatSendBtn.addEventListener('click', sendChat);
+els.chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+
+els.acceptStreamBtn.addEventListener('click', () => {
+  els.acceptOverlay.classList.remove('open');
+  if (state._pendingAccept) { state._pendingAccept(true); state._pendingAccept = null; }
+});
+els.acceptRejectBtn.addEventListener('click', () => {
+  els.acceptOverlay.classList.remove('open');
+  if (state._pendingAccept) { state._pendingAccept(false); state._pendingAccept = null; }
+});
+
+els.reconnectBtn.addEventListener('click', () => {
+  const last = localStorage.getItem(LS_LASTPEER);
+  if (last && state.peer) {
+    els.reconnectBanner.classList.remove('show');
+    dialPeer(last);
+  }
+});
+els.reconnectDismiss.addEventListener('click', () => {
+  els.reconnectBanner.classList.remove('show');
+  localStorage.removeItem(LS_LASTPEER);
+});
+
+// Drag & drop
+['dragenter', 'dragover'].forEach((ev) =>
+  els.dropzone.addEventListener(ev, (e) => {
+    e.preventDefault();
+    if (!state.connected) return;
+    els.dropzone.classList.add('dragover');
+  })
+);
+['dragleave', 'drop'].forEach((ev) =>
+  els.dropzone.addEventListener(ev, (e) => {
+    e.preventDefault();
+    els.dropzone.classList.remove('dragover');
+  })
+);
+els.dropzone.addEventListener('drop', async (e) => {
+  if (!state.connected) return;
+  const items = e.dataTransfer.items;
+  const files = [];
+  const folderPromises = [];
+
+  if (items) {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+      if (entry) {
+        if (entry.isDirectory) {
+          folderPromises.push(readDirEntry(entry));
+        } else if (entry.isFile) {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      } else {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+  } else {
+    for (const f of e.dataTransfer.files) files.push(f);
+  }
+
+  if (folderPromises.length) {
+    const allFolders = await Promise.all(folderPromises);
+    for (const folder of allFolders) {
+      if (folder.length) await sendFolder(folder);
+    }
+  }
+  if (files.length) await queueFiles(files);
+});
+
+async function readDirEntry(dirEntry) {
+  const results = [];
+  async function walk(entry, path) {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      Object.defineProperty(file, 'webkitRelativePath', { value: path + entry.name });
+      results.push(file);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const entries = await new Promise((res, rej) => reader.readEntries(res, rej));
+      for (const e of entries) await walk(e, path + entry.name + '/');
+    }
+  }
+  await walk(dirEntry, '');
+  return results;
+}
+
+els.dropzone.addEventListener('click', () => {
+  if (!state.connected) return;
+  els.fileInput.click();
+});
+els.fileInput.addEventListener('change', (e) => {
+  queueFiles(Array.from(e.target.files));
+  els.fileInput.value = '';
+});
+
+async function queueFiles(files) {
+  for (const f of files) {
+    await sendFile(f);
+  }
+}
+
+// Prevent accidental refresh during active transfers
+window.addEventListener('beforeunload', (e) => {
+  let active = false;
+  state.transfers.forEach((rec) => {
+    if (rec.row.classList.contains('sending') || rec.row.classList.contains('receiving')) {
+      active = true;
+    }
+  });
+  if (active) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+/* =========================================================
+   BOOT
+   ========================================================= */
+generateTicks();
+fakeCoords();
+tickHud();
+setInterval(tickHud, 1000);
+initPeer();
+
+if (window.streamSaver) {
+  streamSaver.mitm = 'https://jimmywarting.github.io/StreamSaver.js/mitm.html?version=2.0.0';
+}
+</script>
+</body>
+</html>
