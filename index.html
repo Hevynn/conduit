@@ -2155,7 +2155,8 @@ async function beginReceive(msg) {
   state.incoming.set(msg.id, meta);
   state._currentIncomingId = msg.id;
   createTransferRow(msg.id, msg.name, msg.size, 'receiving');
-  $log(`inbound: ${msg.name} (${fmtBytes(msg.size)})`);
+  $log(`inbound: ${msg.name} (${fmtBytes(msg.size)})${msg.size === 0 ? ' ⚠ sender reported 0 bytes' : ''}`);
+  console.log('[CONDUIT] beginReceive', { name: msg.name, size: msg.size, id: msg.id });
   audio.fileStart();
 
   if (needsStream) {
@@ -2201,7 +2202,10 @@ async function beginReceive(msg) {
 
 async function endReceive(id) {
   const meta = state.incoming.get(id);
-  if (!meta) return;
+  if (!meta) {
+    $log(`⚠ file-end for unknown id ${id}`);
+    return;
+  }
 
   // If setup is still pending for some reason, wait briefly
   let waits = 0;
@@ -2209,6 +2213,15 @@ async function endReceive(id) {
     await new Promise(r => setTimeout(r, 20));
     waits++;
   }
+
+  $log(`end of transmission: ${meta.name} (${meta.chunks.length} chunks, ${fmtBytes(meta.received)})`);
+  console.log('[CONDUIT] endReceive', {
+    name: meta.name,
+    chunks: meta.chunks.length,
+    received: meta.received,
+    expected: meta.size,
+    hasWriter: !!meta.writer,
+  });
 
   if (meta.writer) {
     try {
@@ -2225,11 +2238,13 @@ async function endReceive(id) {
     }
   } else {
     const blob = new Blob(meta.chunks, { type: meta.mimeType || 'application/octet-stream' });
+    $log(`assembled blob: ${fmtBytes(blob.size)}`);
     finalizeTransfer(id, blob, meta.name);
   }
   state.incoming.delete(id);
-  state._currentIncomingId = null;
-  $log(`received: ${meta.name}`);
+  if (state._currentIncomingId === id) {
+    state._currentIncomingId = null;
+  }
   audio.fileDone();
 }
 
@@ -2252,25 +2267,52 @@ async function sendFile(file) {
   if (!state.connected || !state.conn) return;
   const id = uid();
   const outMeta = { startedAt: performance.now(), speedSamples: [], speed: 0 };
-  createTransferRow(id, file.name, file.size, 'sending');
-  $log(`outbound: ${file.name} (${fmtBytes(file.size)})`);
+
+  // Some browsers report file.size = 0 for files in virtual/cloud/archive
+  // filesystems (Steam library, OneDrive offline, WinRAR preview, network
+  // shares). In that case read the whole file into an ArrayBuffer first
+  // to get the true size and send from that instead.
+  let sourceFile = file;
+  let realSize = file.size;
+  if (!realSize || realSize === 0) {
+    $log(`⚠ ${file.name} reports 0 bytes — reading fully to get real size...`);
+    try {
+      const buf = await file.arrayBuffer();
+      realSize = buf.byteLength;
+      if (realSize > 0) {
+        // Wrap the buffer as a new File so the rest of the code works unchanged
+        sourceFile = new File([buf], file.name, { type: file.type || 'application/octet-stream' });
+        $log(`↳ actual size: ${fmtBytes(realSize)}`);
+      } else {
+        $log(`✗ ${file.name} is genuinely empty — skipping. If this is a real file, try copying it to your desktop first (it may be in a cloud/virtual folder).`);
+        return;
+      }
+    } catch (e) {
+      $log(`✗ could not read ${file.name}: ${e.message}. Try copying it to your desktop first.`);
+      return;
+    }
+  }
+
+  createTransferRow(id, sourceFile.name, realSize, 'sending');
+  $log(`outbound: ${sourceFile.name} (${fmtBytes(realSize)})`);
+  console.log('[CONDUIT] sendFile', { name: sourceFile.name, size: realSize, type: sourceFile.type });
   audio.fileStart();
 
   state.conn.send({
     type: 'file-start',
     id,
-    name: file.name,
-    size: file.size,
-    mimeType: file.type,
+    name: sourceFile.name,
+    size: realSize,
+    mimeType: sourceFile.type,
   });
 
   let offset = 0;
-  while (offset < file.size) {
+  while (offset < realSize) {
     if (state.cancelled.has(id)) {
       state.conn.send({ type: 'file-cancel', id });
       markTransferError(id, 'cancelled');
       state.cancelled.delete(id);
-      $log(`cancelled: ${file.name}`);
+      $log(`cancelled: ${sourceFile.name}`);
       return;
     }
     const dc = state.conn.dataChannel;
@@ -2278,17 +2320,22 @@ async function sendFile(file) {
       await new Promise((r) => setTimeout(r, 20));
       continue;
     }
-    const slice = file.slice(offset, offset + CHUNK_SIZE);
+    const slice = sourceFile.slice(offset, offset + CHUNK_SIZE);
     const buf = await slice.arrayBuffer();
+    if (buf.byteLength === 0) {
+      $log(`⚠ chunk read returned 0 bytes at offset ${offset} — aborting`);
+      markTransferError(id, 'read failed');
+      return;
+    }
     state.conn.send(buf);
     offset += buf.byteLength;
     sampleSpeed(outMeta, buf.byteLength);
-    updateTransferProgress(id, offset, file.size, outMeta.speed);
+    updateTransferProgress(id, offset, realSize, outMeta.speed);
   }
 
   state.conn.send({ type: 'file-end', id });
   markTransferDone(id);
-  $log(`sent: ${file.name}`);
+  $log(`✓ sent: ${sourceFile.name} (${fmtBytes(offset)} in ${((performance.now() - outMeta.startedAt) / 1000).toFixed(1)}s)`);
   audio.fileDone();
 }
 
@@ -2401,23 +2448,56 @@ function markTransferError(id, reason) {
 
 function finalizeTransfer(id, blob, name) {
   const rec = state.transfers.get(id);
-  if (!rec) return;
+  if (!rec) {
+    $log(`⚠ finalize: no record for ${name}`);
+    console.warn('[CONDUIT] finalize: no record for', id, name);
+    return;
+  }
   const row = rec.row;
   markTransferDone(id);
+
+  // Persist blob so repeat clicks always work
   const url = URL.createObjectURL(blob);
+  rec.blobUrl = url;
+  rec.blobName = name;
+  rec.blob = blob;
 
-  // Main prominent save button
-  const saveBtn = document.createElement('a');
-  saveBtn.href = url;
-  saveBtn.download = name;
+  $log(`✓ ready: ${name} (${fmtBytes(blob.size)})`);
+  console.log('[CONDUIT] ready to save', { id, name, size: blob.size });
+
+  const actions = row.querySelector('.transfer-actions');
+  actions.innerHTML = '';
+
+  // Build a real <button> with explicit click handler (most reliable pattern)
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
   saveBtn.className = 'save-link';
-  saveBtn.textContent = '↓ save file';
-  row.querySelector('.transfer-actions').appendChild(saveBtn);
+  saveBtn.textContent = `↓ save file`;
+  saveBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Create a FRESH anchor, attach to body, click, remove — works in all browsers
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      if (a.parentNode) document.body.removeChild(a);
+    }, 100);
+    $log(`→ save triggered: ${name}`);
+  });
+  actions.appendChild(saveBtn);
 
-  // Auto-trigger once (user may still click manually if browser blocks)
+  // Try auto-save once (many browsers block this — that's fine, the button is there)
   setTimeout(() => {
-    try { saveBtn.click(); } catch (e) {}
-  }, 100);
+    try {
+      saveBtn.click();
+    } catch (err) {
+      $log(`auto-save blocked — click "save file" button to download`);
+    }
+  }, 200);
 }
 
 /* =========================================================
