@@ -1505,6 +1505,7 @@
           <div class="aperture-actions">
             <button class="ghost" id="copyIdBtn" disabled>copy</button>
             <button class="ghost" id="qrBtn" disabled>qr</button>
+            <button class="ghost warn" id="newIdBtn" disabled title="generate a new signature">new</button>
           </div>
         </div>
       </div>
@@ -1650,6 +1651,7 @@ const els = {
   statusText:      $('statusText'),
   copyIdBtn:       $('copyIdBtn'),
   qrBtn:           $('qrBtn'),
+  newIdBtn:        $('newIdBtn'),
   peerInput:       $('peerInput'),
   passInput:       $('passInput'),
   connectBtn:      $('connectBtn'),
@@ -1908,13 +1910,15 @@ async function tryClaimCode(code) {
   });
 }
 
-async function claimShortCode() {
-  // Try saved id first
-  const savedId = localStorage.getItem(LS_MYID);
-  if (savedId && /^[A-Z0-9]{6}$/.test(savedId)) {
-    const res = await tryClaimCode(savedId);
-    if (res.ok) return res;
-    if (res.fatal) throw res.fatal;
+async function claimShortCode({ skipSaved = false } = {}) {
+  // Try saved id first (unless explicitly skipped, e.g. on regenerate)
+  if (!skipSaved) {
+    const savedId = localStorage.getItem(LS_MYID);
+    if (savedId && /^[A-Z0-9]{6}$/.test(savedId)) {
+      const res = await tryClaimCode(savedId);
+      if (res.ok) return res;
+      if (res.fatal) throw res.fatal;
+    }
   }
   // Otherwise try fresh random codes
   for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
@@ -1925,11 +1929,11 @@ async function claimShortCode() {
   throw new Error('Could not claim a signature');
 }
 
-async function initPeer() {
+async function initPeer({ skipSaved = false } = {}) {
   setApertureState('searching', 'claiming signature');
-  $log('initializing peer node...');
+  $log(skipSaved ? 'generating fresh signature...' : 'initializing peer node...');
   try {
-    const { peer, code, fullId } = await claimShortCode();
+    const { peer, code, fullId } = await claimShortCode({ skipSaved });
     state.peer = peer;
     state.myId = code;
     state.myFullId = fullId;
@@ -1938,6 +1942,7 @@ async function initPeer() {
     els.coordNode.textContent = code;
     els.copyIdBtn.disabled = false;
     els.qrBtn.disabled = false;
+    els.newIdBtn.disabled = false;
     els.connectBtn.disabled = false;
     setApertureState('idle', 'standing by');
     $log(`peer node ready: ${code}`);
@@ -1966,16 +1971,67 @@ async function initPeer() {
       setApertureState('error', 'relay lost');
     });
 
-    // Offer reconnect to last peer
-    const last = localStorage.getItem(LS_LASTPEER);
-    if (last && last !== code && /^[A-Z0-9]{6}$/.test(last)) {
-      els.reconnectPeer.textContent = last;
-      els.reconnectBanner.classList.add('show');
+    // Offer reconnect to last peer (only on initial boot, not on regenerate)
+    if (!skipSaved) {
+      const last = localStorage.getItem(LS_LASTPEER);
+      if (last && last !== code && /^[A-Z0-9]{6}$/.test(last)) {
+        els.reconnectPeer.textContent = last;
+        els.reconnectBanner.classList.add('show');
+      }
     }
   } catch (err) {
     $log('failed to init: ' + (err.message || err));
     setApertureState('error', 'init failed');
   }
+}
+
+/* Regenerate a fresh peer signature. Tears down the current peer and
+   any active connection, then re-claims a new short code. */
+async function regenerateId() {
+  if (state.connected) {
+    const ok = confirm('Generating a new signature will drop your current link.\n\nContinue?');
+    if (!ok) return;
+  } else {
+    const ok = confirm('Generate a new peer signature?\n\nYour current code will be released and anyone holding it will no longer be able to reach you.');
+    if (!ok) return;
+  }
+
+  $log('releasing current signature...');
+
+  // Disable buttons during regen
+  els.newIdBtn.disabled = true;
+  els.copyIdBtn.disabled = true;
+  els.qrBtn.disabled = true;
+  els.connectBtn.disabled = true;
+
+  // Drop active connection
+  if (state.conn) {
+    try { state.conn.close(); } catch (e) {}
+    state.conn = null;
+  }
+
+  // Destroy the existing peer (frees the old code on the relay)
+  if (state.peer) {
+    try { state.peer.destroy(); } catch (e) {}
+    state.peer = null;
+  }
+
+  state.connected = false;
+  state.authed = false;
+  state.myId = null;
+  state.myFullId = null;
+  els.myId.textContent = '– – – – – –';
+
+  // Clear saved id so claimShortCode generates a fresh one
+  localStorage.removeItem(LS_MYID);
+
+  // Hide reconnect banner since the relationship is severed from our side
+  els.reconnectBanner.classList.remove('show');
+
+  // Small delay to give the relay a moment to release the old id
+  await new Promise(r => setTimeout(r, 250));
+
+  await initPeer({ skipSaved: true });
 }
 
 /* =========================================================
@@ -2056,38 +2112,63 @@ function onAuthFail() {
    INCOMING HANDLER — RACE-SAFE
    ========================================================= */
 async function handleIncoming(data) {
-  // Binary chunk during active file
+  // Binary chunk during active file.
+  // WebRTC/PeerJS may deliver binary as ArrayBuffer, Blob, Uint8Array, or
+  // other typed arrays depending on browser + serialization. Normalize all
+  // of them to ArrayBuffer so chunks never go missing.
+  let binaryBuf = null;
   if (data instanceof ArrayBuffer) {
+    binaryBuf = data;
+  } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    binaryBuf = await data.arrayBuffer();
+  } else if (ArrayBuffer.isView(data)) {
+    // Uint8Array, Int8Array, etc.
+    binaryBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  }
+
+  if (binaryBuf) {
     const currentId = state._currentIncomingId;
-    if (!currentId) return;
+    if (!currentId) {
+      console.warn('[CONDUIT] binary chunk arrived with no active receive', binaryBuf.byteLength);
+      return;
+    }
     const meta = state.incoming.get(currentId);
     if (!meta) return;
 
-    meta.received += data.byteLength;
-    sampleSpeed(meta, data.byteLength);
+    meta.received += binaryBuf.byteLength;
+    sampleSpeed(meta, binaryBuf.byteLength);
     updateTransferProgress(currentId, meta.received, meta.size, meta.speed);
 
     if (meta.setupPending) {
       // Queue chunks until beginReceive finishes async setup
-      meta.pendingChunks.push(data);
+      meta.pendingChunks.push(binaryBuf);
       return;
     }
 
     if (meta.writer) {
       try {
-        await meta.writer.write(new Uint8Array(data));
+        await meta.writer.write(new Uint8Array(binaryBuf));
       } catch (e) {
         $log('stream write failed: ' + e.message);
       }
     } else {
-      meta.chunks.push(data);
+      meta.chunks.push(binaryBuf);
     }
     return;
   }
 
   // Control message
   try {
-    const msg = typeof data === 'string' ? JSON.parse(data) : data;
+    let msg;
+    if (typeof data === 'string') {
+      msg = JSON.parse(data);
+    } else if (data && typeof data === 'object' && 'type' in data) {
+      msg = data;
+    } else {
+      console.warn('[CONDUIT] unrecognized message shape', data);
+      $log(`⚠ dropped unrecognized message (type: ${typeof data})`);
+      return;
+    }
 
     if (msg.type === 'auth') {
       const pass = state.passphrase || '';
@@ -2119,7 +2200,9 @@ async function handleIncoming(data) {
         if (meta.writer) { try { await meta.writer.abort(); } catch (e) {} }
         markTransferError(msg.id, 'cancelled');
         state.incoming.delete(msg.id);
-        state._currentIncomingId = null;
+        if (state._currentIncomingId === msg.id) {
+          state._currentIncomingId = null;
+        }
         $log(`sender cancelled: ${meta.name}`);
       }
       return;
@@ -2223,6 +2306,26 @@ async function endReceive(id) {
     hasWriter: !!meta.writer,
   });
 
+  // Integrity check — surface mismatch loudly instead of silently
+  // delivering a 0-byte file.
+  if (meta.size > 0 && meta.received !== meta.size) {
+    $log(`✗ INTEGRITY MISMATCH: expected ${fmtBytes(meta.size)}, got ${fmtBytes(meta.received)}`);
+    markTransferError(id, `incomplete: ${fmtBytes(meta.received)} of ${fmtBytes(meta.size)}`);
+    if (meta.writer) { try { await meta.writer.abort(); } catch (e) {} }
+    state.incoming.delete(id);
+    if (state._currentIncomingId === id) state._currentIncomingId = null;
+    audio.error();
+    return;
+  }
+  if (meta.received === 0) {
+    $log(`✗ no data arrived for ${meta.name} — sender likely had a 0-byte file`);
+    markTransferError(id, 'empty (no data)');
+    state.incoming.delete(id);
+    if (state._currentIncomingId === id) state._currentIncomingId = null;
+    audio.error();
+    return;
+  }
+
   if (meta.writer) {
     try {
       await meta.writer.close();
@@ -2239,6 +2342,16 @@ async function endReceive(id) {
   } else {
     const blob = new Blob(meta.chunks, { type: meta.mimeType || 'application/octet-stream' });
     $log(`assembled blob: ${fmtBytes(blob.size)}`);
+    if (blob.size === 0) {
+      // Sanity guard: the assembled blob should never be 0 here, since
+      // we already verified meta.received > 0. If we hit this it means
+      // chunks were collected but Blob refused to assemble.
+      $log(`✗ assembled blob is 0 bytes despite ${meta.chunks.length} chunks received`);
+      markTransferError(id, 'assembly failed');
+      state.incoming.delete(id);
+      if (state._currentIncomingId === id) state._currentIncomingId = null;
+      return;
+    }
     finalizeTransfer(id, blob, meta.name);
   }
   state.incoming.delete(id);
@@ -2263,6 +2376,40 @@ function sampleSpeed(meta, bytes) {
 /* =========================================================
    OUTGOING
    ========================================================= */
+
+/* Read a File robustly. Tries file.arrayBuffer() first, then FileReader
+   as a fallback. Returns an ArrayBuffer or throws. */
+async function readFileFully(file) {
+  // Path 1: modern arrayBuffer() API
+  try {
+    const buf = await file.arrayBuffer();
+    if (buf && buf.byteLength > 0) return buf;
+  } catch (e) {
+    console.warn('[CONDUIT] file.arrayBuffer() failed:', e.message);
+  }
+
+  // Path 2: FileReader fallback (older API, sometimes works when
+  // arrayBuffer() doesn't on virtual/cloud filesystems)
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (result && result.byteLength > 0) {
+        resolve(result);
+      } else {
+        reject(new Error('FileReader returned empty result'));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+    reader.onabort = () => reject(new Error('FileReader aborted'));
+    try {
+      reader.readAsArrayBuffer(file);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 async function sendFile(file) {
   if (!state.connected || !state.conn) return;
   const id = uid();
@@ -2275,20 +2422,16 @@ async function sendFile(file) {
   let sourceFile = file;
   let realSize = file.size;
   if (!realSize || realSize === 0) {
-    $log(`⚠ ${file.name} reports 0 bytes — reading fully to get real size...`);
+    $log(`⚠ ${file.name} reports 0 bytes — attempting full read...`);
     try {
-      const buf = await file.arrayBuffer();
+      const buf = await readFileFully(file);
       realSize = buf.byteLength;
-      if (realSize > 0) {
-        // Wrap the buffer as a new File so the rest of the code works unchanged
-        sourceFile = new File([buf], file.name, { type: file.type || 'application/octet-stream' });
-        $log(`↳ actual size: ${fmtBytes(realSize)}`);
-      } else {
-        $log(`✗ ${file.name} is genuinely empty — skipping. If this is a real file, try copying it to your desktop first (it may be in a cloud/virtual folder).`);
-        return;
-      }
+      // Wrap the buffer as a new File so the rest of the code works unchanged
+      sourceFile = new File([buf], file.name, { type: file.type || 'application/octet-stream' });
+      $log(`↳ recovered actual size: ${fmtBytes(realSize)}`);
     } catch (e) {
-      $log(`✗ could not read ${file.name}: ${e.message}. Try copying it to your desktop first.`);
+      $log(`✗ could not read ${file.name}: ${e.message}`);
+      $log(`↳ try copying the file to your Desktop or Downloads first, then drag it from there.`);
       return;
     }
   }
@@ -2616,6 +2759,7 @@ els.copyIdBtn.addEventListener('click', async () => {
 });
 
 els.qrBtn.addEventListener('click', showQR);
+els.newIdBtn.addEventListener('click', regenerateId);
 els.qrCloseBtn.addEventListener('click', () => els.qrOverlay.classList.remove('open'));
 els.qrOverlay.addEventListener('click', (e) => {
   if (e.target === els.qrOverlay) els.qrOverlay.classList.remove('open');
@@ -2637,7 +2781,7 @@ function dialPeer(rawCode) {
   state.isInitiator = true;
   $log(`dialing ${code}...`);
   setApertureState('searching', 'establishing link');
-  const conn = state.peer.connect(target, { reliable: true });
+  const conn = state.peer.connect(target, { reliable: true, serialization: 'binary' });
   attachConnection(conn);
 }
 
