@@ -1438,7 +1438,7 @@
   <!-- Floating HUD labels (edges) -->
   <div class="hud-label hud-l1 active"><span class="dot"></span><span>sync lock</span><span class="val">stable</span></div>
   <div class="hud-label hud-l2"><span class="dot"></span><span>thermal</span><span class="val warm">nominal</span></div>
-  <div class="hud-label hud-l4"><span class="dot"></span><span>buffer</span><span class="val" id="hudBuffer">—</span></div>
+  <div class="hud-label hud-l4"><span class="dot"></span><span id="hudL4Label">buffer</span><span class="val" id="hudBuffer">—</span></div>
   <div class="hud-label hud-l5 active"><span class="dot"></span><span>link</span><span class="val" id="hudLink">—</span></div>
 
   <div class="hud-label hud-r1 active"><span class="dot"></span><span>encrypt</span><span class="val">aes-256</span></div>
@@ -1614,8 +1614,11 @@
    CONDUIT v0.4 — P2P file transfer via WebRTC
    ========================================================= */
 
-const CHUNK_SIZE       = 64 * 1024;
-const MAX_BUFFERED     = 16 * 1024 * 1024;
+const CHUNK_SIZE       = 256 * 1024;
+const MAX_BUFFERED     = 8 * 1024 * 1024;     // pause when channel has 8MB pending
+const BUFFER_LOW_WATER = 1 * 1024 * 1024;     // resume when it drops to 1MB
+const READ_BATCH       = 4 * 1024 * 1024;     // read 4MB from disk at a time, ship in chunks
+const PROGRESS_INTERVAL = 100;                // ms between UI progress updates
 const SPEED_WINDOW     = 1500;
 const STREAM_THRESHOLD = 2 * 1024 * 1024 * 1024; // 2 GB → StreamSaver path
 const ID_PREFIX        = 'cdt-';
@@ -1686,6 +1689,7 @@ const els = {
   coordNode:   $('coordNode'),
   hudLink:     $('hudLink'),
   hudBuffer:   $('hudBuffer'),
+  hudL4Label:  $('hudL4Label'),
   hudLatency:  $('hudLatency'),
   hudSession:  $('hudSession'),
   integrityReadout: $('integrityReadout'),
@@ -2137,7 +2141,13 @@ async function handleIncoming(data) {
 
     meta.received += binaryBuf.byteLength;
     sampleSpeed(meta, binaryBuf.byteLength);
-    updateTransferProgress(currentId, meta.received, meta.size, meta.speed);
+
+    // Throttle progress updates to avoid DOM thrashing at high throughput
+    const now = performance.now();
+    if (!meta._lastProgress || now - meta._lastProgress > PROGRESS_INTERVAL || meta.received >= meta.size) {
+      updateTransferProgress(currentId, meta.received, meta.size, meta.speed);
+      meta._lastProgress = now;
+    }
 
     if (meta.setupPending) {
       // Queue chunks until beginReceive finishes async setup
@@ -2449,7 +2459,37 @@ async function sendFile(file) {
     mimeType: sourceFile.type,
   });
 
+  // Grab the underlying RTCDataChannel for raw, no-overhead binary sends.
+  // PeerJS's serializer wraps every send() in BinaryPack; for pure binary
+  // chunks we skip that entirely. Control messages still go through PeerJS.
+  const dc = state.conn.dataChannel;
+  if (dc) {
+    // Tune the "low water" threshold so bufferedamountlow fires at the
+    // right moment to keep the pipeline saturated.
+    dc.bufferedAmountLowThreshold = BUFFER_LOW_WATER;
+  }
+
+  // Helper: wait until the channel buffer drains below low-water mark.
+  // Event-driven (no polling), so we resume the instant there's room.
+  const waitForDrain = () => new Promise((resolve) => {
+    if (!dc || dc.bufferedAmount <= MAX_BUFFERED) return resolve();
+    const onLow = () => {
+      dc.removeEventListener('bufferedamountlow', onLow);
+      resolve();
+    };
+    dc.addEventListener('bufferedamountlow', onLow);
+    // Safety: if the event somehow doesn't fire in 500ms, poll once to unstick.
+    setTimeout(() => {
+      dc.removeEventListener('bufferedamountlow', onLow);
+      resolve();
+    }, 500);
+  });
+
   let offset = 0;
+  let lastProgressUpdate = 0;
+
+  // Outer loop: read big batches from disk, then ship them in chunks.
+  // This amortizes the cost of slice() + arrayBuffer() across many sends.
   while (offset < realSize) {
     if (state.cancelled.has(id)) {
       state.conn.send({ type: 'file-cancel', id });
@@ -2458,27 +2498,78 @@ async function sendFile(file) {
       $log(`cancelled: ${sourceFile.name}`);
       return;
     }
-    const dc = state.conn.dataChannel;
-    if (dc && dc.bufferedAmount > MAX_BUFFERED) {
-      await new Promise((r) => setTimeout(r, 20));
-      continue;
-    }
-    const slice = sourceFile.slice(offset, offset + CHUNK_SIZE);
-    const buf = await slice.arrayBuffer();
-    if (buf.byteLength === 0) {
-      $log(`⚠ chunk read returned 0 bytes at offset ${offset} — aborting`);
+
+    // Read a big batch (e.g. 4MB) from the source file in one shot
+    const batchEnd = Math.min(offset + READ_BATCH, realSize);
+    const batchSlice = sourceFile.slice(offset, batchEnd);
+    let batchBuf;
+    try {
+      batchBuf = await batchSlice.arrayBuffer();
+    } catch (e) {
+      $log(`✗ read failed at offset ${offset}: ${e.message}`);
       markTransferError(id, 'read failed');
       return;
     }
-    state.conn.send(buf);
-    offset += buf.byteLength;
-    sampleSpeed(outMeta, buf.byteLength);
-    updateTransferProgress(id, offset, realSize, outMeta.speed);
+    if (batchBuf.byteLength === 0) {
+      $log(`⚠ batch read returned 0 bytes at offset ${offset} — aborting`);
+      markTransferError(id, 'read failed');
+      return;
+    }
+
+    // Inner loop: ship the batch as CHUNK_SIZE pieces over the data channel
+    let batchOffset = 0;
+    while (batchOffset < batchBuf.byteLength) {
+      if (state.cancelled.has(id)) {
+        state.conn.send({ type: 'file-cancel', id });
+        markTransferError(id, 'cancelled');
+        state.cancelled.delete(id);
+        $log(`cancelled: ${sourceFile.name}`);
+        return;
+      }
+
+      // Backpressure: pause if channel is too full
+      if (dc && dc.bufferedAmount > MAX_BUFFERED) {
+        await waitForDrain();
+      }
+
+      const pieceEnd = Math.min(batchOffset + CHUNK_SIZE, batchBuf.byteLength);
+      const piece = batchBuf.slice(batchOffset, pieceEnd);
+
+      // Send raw on the underlying channel if available, fall back to PeerJS
+      try {
+        if (dc && dc.readyState === 'open') {
+          dc.send(piece);
+        } else {
+          state.conn.send(piece);
+        }
+      } catch (e) {
+        // SCTP send queue full — back off briefly and retry the same piece
+        await new Promise(r => setTimeout(r, 5));
+        continue;
+      }
+
+      batchOffset += piece.byteLength;
+      offset += piece.byteLength;
+      sampleSpeed(outMeta, piece.byteLength);
+      state._outgoingSpeed = outMeta.speed;
+
+      // Throttle UI updates to PROGRESS_INTERVAL ms — DOM thrashing was
+      // a real bottleneck at high throughput. The user can't perceive
+      // updates faster than ~10/sec anyway.
+      const now = performance.now();
+      if (now - lastProgressUpdate > PROGRESS_INTERVAL || offset >= realSize) {
+        updateTransferProgress(id, offset, realSize, outMeta.speed);
+        lastProgressUpdate = now;
+      }
+    }
   }
 
   state.conn.send({ type: 'file-end', id });
   markTransferDone(id);
-  $log(`✓ sent: ${sourceFile.name} (${fmtBytes(offset)} in ${((performance.now() - outMeta.startedAt) / 1000).toFixed(1)}s)`);
+  state._outgoingSpeed = 0;
+  const elapsed = (performance.now() - outMeta.startedAt) / 1000;
+  const avgSpeed = realSize / elapsed;
+  $log(`✓ sent: ${sourceFile.name} (${fmtBytes(offset)} in ${elapsed.toFixed(1)}s · avg ${fmtSpeed(avgSpeed)})`);
   audio.fileDone();
 }
 
@@ -2711,11 +2802,34 @@ function tickHud() {
   const ss = String(sec % 60).padStart(2, '0');
   if (els.hudSession) els.hudSession.textContent = mm + ':' + ss;
 
-  // Buffer indicator
-  if (state.conn && state.conn.dataChannel) {
+  // Smart label: show live transfer rate when active, channel buffer otherwise
+  let activeSpeed = 0;
+  let activeCount = 0;
+  state.transfers.forEach((rec) => {
+    if (rec.row.classList.contains('sending') || rec.row.classList.contains('receiving')) {
+      activeCount++;
+    }
+  });
+  // Look up speed from any in-flight incoming transfer
+  state.incoming.forEach((meta) => {
+    if (meta.speed > activeSpeed) activeSpeed = meta.speed;
+  });
+  // Also consider the latest outgoing send rate
+  if (state._outgoingSpeed && state._outgoingSpeed > activeSpeed) {
+    activeSpeed = state._outgoingSpeed;
+  }
+
+  if (activeCount > 0 && state.conn && state.conn.dataChannel) {
+    if (els.hudL4Label) els.hudL4Label.textContent = 'rate';
+    if (els.hudBuffer) {
+      els.hudBuffer.textContent = activeSpeed > 0 ? fmtSpeed(activeSpeed) : 'syncing';
+    }
+  } else if (state.conn && state.conn.dataChannel) {
+    if (els.hudL4Label) els.hudL4Label.textContent = 'buffer';
     const buf = state.conn.dataChannel.bufferedAmount;
     if (els.hudBuffer) els.hudBuffer.textContent = fmtBytes(buf);
   } else {
+    if (els.hudL4Label) els.hudL4Label.textContent = 'buffer';
     if (els.hudBuffer) els.hudBuffer.textContent = '—';
   }
 
